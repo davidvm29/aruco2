@@ -656,6 +656,11 @@ std::vector<FiducialMarker>  MarkerDetector::detect(const cv::Mat &img,   const 
                     }
                 }
 
+                if(i==0){//prevent elements with low entropy from being analyzed
+                    double minv=255,maxv=0;
+                    cv::minMaxLoc(bits,&minv,&maxv);
+                    if( maxv-minv < 10) break;
+                }
 
                 if(i==2){ // if not working the first time, try this time adaptive threshold into the bits to improve robustness to lighting
                     thres255Adaptive(bits,bitadaptive);
