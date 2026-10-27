@@ -45,7 +45,7 @@ add_custom_command(
 # Include the binary directory so the compiler can find the generated header
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
-SET(SRCARUCO2  opencv2/objdetect/aruco2.hpp src/aruco2.cpp src/aruco_dictionary.hpp src/aruco_dictionary.cpp src/aruco2_fractal.cpp
+SET(SRCARUCO2  opencv2/objdetect/aruco2.hpp src/aruco2.cpp src/aruco_dictionary.hpp src/aruco_dictionary.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/opencl_kernels_aruco2.hpp"
     "${CMAKE_CURRENT_BINARY_DIR}/opencl_kernels_aruco2.cpp"
 )
@@ -73,9 +73,6 @@ target_link_libraries(aruco2_detect_markers PRIVATE ${OpenCV_LIBS})
 
 add_executable(aruco2_detect_diamonds utils/aruco2_detect_diamonds.cpp ${SRCARUCO2})
 target_link_libraries(aruco2_detect_diamonds PRIVATE ${OpenCV_LIBS})
-
-add_executable(aruco2_detect_fractal utils/aruco2_detect_fractal.cpp ${SRCARUCO2})
-target_link_libraries(aruco2_detect_fractal PRIVATE ${OpenCV_LIBS})
 
 add_executable(aruco2_detect_raruco utils/aruco2_detect_raruco.cpp ${SRCARUCO2})
 target_link_libraries(aruco2_detect_raruco PRIVATE ${OpenCV_LIBS})

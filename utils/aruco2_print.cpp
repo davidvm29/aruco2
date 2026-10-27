@@ -12,7 +12,6 @@
  *   type           Type of pattern to generate:
  *                    m : Single standard fiducial marker
  *                    d : Diamond marker
- *                    f : Fractal marker
  *                    b : Grid board
  *                    r : RAruco marker
  *   out.png        Output file path to save the generated image
@@ -24,10 +23,10 @@
 using namespace std;
 int main(int argc,char **argv) {
     try{
-        if(argc!=3)throw std::runtime_error("Usage: type [m (marker)|d (diamond)|f (fractal)|b (boad)| r (raruco)] out.png");
+        if(argc!=3)throw std::runtime_error("Usage: type [m (marker)|d (diamond)|b (boad)| r (raruco)] out.png");
 
         std::string type= argv[1];
-        if(type!="m" && type!="d" && type!="f" && type!="b"&& type!="r")throw std::runtime_error("Usage: type [m (marker)|d (diamond)|f (fractal)|b (boad)] out.png");
+        if(type!="m" && type!="d" && type!="f" && type!="b"&& type!="r")throw std::runtime_error("Usage: type [m (marker)|d (diamond)|b (boad)| r (raruco)] out.png");
 
         cv::Mat outImage;
         if(type=="m"){
@@ -37,9 +36,6 @@ int main(int argc,char **argv) {
         else if(type=="d"){
             cv::Vec4i id{0,1,2,3};
             cv::aruco2::getDiamondImage(outImage,cv::aruco2::DICT_ARUCO_MIP_36h12,id);
-        }
-        else if(type=="f"){
-            cv::aruco2::getFractalMarkerImage(outImage,cv::aruco2::FRACTAL_3L_6);
         }
         else if(type=="b"){
             cv::aruco2::getGridBoardImage(outImage,cv::Size(9,5), cv::aruco2::DICT_ARUCO_MIP_36h12);
