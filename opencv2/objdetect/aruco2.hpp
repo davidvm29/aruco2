@@ -48,6 +48,40 @@ enum DictionaryType {
     DICT_ALVAR_7X7_1000     ///< 7x7 bits, minimum hamming distance between any two codes = 4, 1000 codes (ALVAR IDs 256-1255)
 };
 
+
+/** @brief Layout of the auxiliary ArUco markers in one PRISMarker level. */
+enum PrismaLayout {
+    PRISMA_LAYOUT_CARDINAL = 0,
+    PRISMA_LAYOUT_CORNERS
+};
+
+/** @brief Predefined PRISMarker dictionaries. */
+enum PrismaDict {
+    PRISMA_D1_ARUCO_MIP_36H12 = 0,
+    PRISMA_D2_ARUCO_MIP_36H12,
+    PRISMA_D3_ARUCO_MIP_36H12,
+    PRISMA_D4_ARUCO_MIP_36H12,
+    PRISMA_D1_APRILTAG_36H11,
+    PRISMA_D2_APRILTAG_36H11,
+    PRISMA_D3_APRILTAG_36H11,
+    PRISMA_D4_APRILTAG_36H11
+};
+
+/** @brief Name of a predefined PRISMarker dictionary. */
+CV_EXPORTS_W cv::String getPrismaName(PrismaDict dictionary);
+
+/** @brief Find a predefined PRISMarker dictionary by name. */
+CV_EXPORTS_W PrismaDict getPrismaType(const cv::String& name);
+
+/** @brief Get its underlying ArUco dictionary. */
+CV_EXPORTS_W DictionaryType getPrismaDict(PrismaDict dictionary);
+
+/** @brief Number of markers in a PRISMarker dictionary. */
+CV_EXPORTS_W int getPrismaCount(PrismaDict dictionary);
+
+/** @brief Names of all predefined PRISMarker dictionaries. */
+CV_EXPORTS_W std::vector<cv::String> getPrismaNames();
+
 /** @brief Detection parameters for detectFiducialMarkers() and detectGridBoard().
  *
  * All parameters have defaults that work well for standard printed markers under normal lighting.
@@ -451,6 +485,126 @@ CV_EXPORTS_W void drawDiamonds(InputOutputArray image, const std::vector<cv::aru
  * @snippet samples/cpp/tutorial_code/objdetect/aruco2/aruco2_diamonds.cpp pose_diamond
  */
 CV_EXPORTS_W void getSolvePnpPoints(const cv::aruco2::Diamond &diamond, OutputArray objPoints, OutputArray imgPoints, float markerSize = 1.f);
+
+
+/** @brief PRISMarker detection result type. */
+enum PrismaType {
+    PRISMA_CUSTOM = 100
+};
+
+class PrismaDetector;
+
+/** @brief A detected PRISMarker. */
+struct CV_EXPORTS_W_SIMPLE PrismaMarker
+{
+    CV_WRAP PrismaMarker() {}
+
+    CV_PROP_RW std::vector<cv::Point2f> corners;
+    CV_PROP_RW PrismaType type;
+    CV_PROP_RW int id = -1;
+
+    CV_WRAP Point2f getCorner(int i) const {
+        return corners[i];
+    }
+
+    // Number of detected levels, excluding the central ArUco.
+    CV_WRAP int getNLevels() const {
+        int n = 0;
+        for (int depth : levelIndices)
+            if (depth > 0)
+                n++;
+        return n;
+    }
+
+    // Level depths: 0 = center, 1 = outermost, increasing inwards.
+    CV_WRAP std::vector<int> getLevels() const {
+        return levelIndices;
+    }
+
+    // Levels containing detected auxiliary ArUcos.
+    CV_WRAP std::vector<int> getArucoLevels() const {
+        return arucoLevels;
+    }
+
+private:
+    std::vector<std::vector<cv::Point2f>> levelCorners;
+    std::vector<int> levelIndices;
+    std::vector<int> arucoLevels;
+    std::vector<std::vector<cv::Point2f>> arucoCorners;
+
+    cv::Point2f center;
+    bool hasCenter = false;
+
+    std::vector<cv::Point2f> imgPoints;
+    std::vector<cv::Point3f> objPoints;
+
+    friend class PrismaDetector;
+
+    friend void getSolvePnpPoints(
+        const PrismaMarker& marker,
+        OutputArray objPoints,
+        OutputArray imgPoints,
+        float markerSize
+    );
+
+    friend void drawPrisma(
+        InputOutputArray image,
+        const std::vector<PrismaMarker>& markers,
+        Scalar color,
+        bool drawAllImagePoints
+    );
+};
+
+/** @brief PRISMarker detector with a reusable dictionary. */
+class CV_EXPORTS_W PrismaDetector
+{
+public:
+    CV_WRAP PrismaDetector(PrismaDict dictionary);
+
+    ~PrismaDetector();
+
+    CV_WRAP void setDictionary(PrismaDict dictionary);
+
+    CV_WRAP std::vector<PrismaMarker> detect(
+        InputArray image,
+        bool pose = false
+    );
+
+private:
+    struct PData;
+    cv::Ptr<PData> data;
+};
+
+/** @brief Generate PRISMarker images. */
+CV_EXPORTS_W std::vector<cv::Mat> printPrisma(
+    PrismaDict dictionary,
+    int markerId = -1,
+    int bitSize = -1
+);
+
+/** @brief Detect PRISMarkers in an image. */
+CV_EXPORTS_W std::vector<PrismaMarker> detectPrisma(
+    InputArray image,
+    PrismaDict dictionary,
+    bool pose = false
+);
+
+/** @brief Draw detected PRISMarkers. */
+CV_EXPORTS_W void drawPrisma(
+    InputOutputArray image,
+    const std::vector<PrismaMarker>& markers,
+    Scalar color = Scalar(0, 255, 0),
+    bool drawAllImagePoints = true
+);
+
+/** @brief Get 2D/3D correspondences for pose estimation. */
+CV_EXPORTS_W void getSolvePnpPoints(
+    const PrismaMarker& marker,
+    OutputArray objPoints,
+    OutputArray imgPoints,
+    float markerSize = 1.f
+);
+
 
 /** @brief Render a RArUco marker to a grayscale image.
  *
