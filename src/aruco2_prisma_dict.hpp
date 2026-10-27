@@ -1,4 +1,28 @@
 
+#ifndef OPENCV_ARUCO2_PRISMA_DICT_HPP
+#define OPENCV_ARUCO2_PRISMA_DICT_HPP
+
+#include <array>
+#include <vector>
+
+#include "opencv2/objdetect/aruco2.hpp"
+
+namespace cv {
+namespace aruco2 {
+
+// Auxiliary ArUco dictionary metadata.
+struct DictInfo
+{
+    DictionaryType type;
+    const char* name;
+    int count;
+    int bits;
+    int minDist;
+};
+
+const DictInfo& getDictInfo(DictionaryType dictionary);
+const DictInfo& getDictInfo(const cv::String& name);
+
 namespace detail {
 
 // One level of a PRISMarker.
@@ -31,3 +55,7 @@ PDict loadPDict(PrismaDict type);
 PDict loadPDict(const cv::String& name);
 
 } // namespace detail
+} // namespace aruco2
+} // namespace cv
+
+#endif // OPENCV_ARUCO2_PRISMA_DICT_HPP
