@@ -45,7 +45,7 @@ add_custom_command(
 # Include the binary directory so the compiler can find the generated header
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
-SET(SRCARUCO2  opencv2/objdetect/aruco2.hpp src/aruco2.cpp src/aruco_dictionary.hpp src/aruco_dictionary.cpp src/aruco2_prisma_predefined.cpp src/aruco2_dictionary_info.cpp
+SET(SRCARUCO2  opencv2/objdetect/aruco2.hpp src/aruco2.cpp src/aruco_dictionary.hpp src/aruco_dictionary.cpp src/aruco2_prisma.cpp src/aruco2_prisma_predefined.cpp src/aruco2_dictionary_info.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/opencl_kernels_aruco2.hpp"
     "${CMAKE_CURRENT_BINARY_DIR}/opencl_kernels_aruco2.cpp"
 )
