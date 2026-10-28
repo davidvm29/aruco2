@@ -1,15 +1,15 @@
-// PRISMarker code detector and printer
+// PRISMarker detection and printing.
 #include "opencv2/objdetect/aruco2.hpp"
 #include "aruco2_prisma_dict.hpp"
 #include "aruco2_dictionary.hpp"
 #include <opencv2/imgproc.hpp>
 #include <opencv2/core/hal/intrin.hpp>
 #include <opencv2/flann.hpp>
-//IF OpenCV 5
+// OpenCV 5
 #if CV_VERSION_MAJOR >= 5
 #include <opencv2/features.hpp>
 #include <opencv2/3d.hpp>
-//IF OpenCV 4
+// OpenCV 4
 #elif CV_VERSION_MAJOR >= 4
 #include <opencv2/features2d.hpp>
 #include <opencv2/calib3d.hpp>
@@ -31,17 +31,12 @@
 
 
 namespace {
-namespace nanofractal {
+namespace prisma {
 struct Homographer{
     Homographer(const std::vector<cv::Point2f> & out ){
         CV_Assert(out.size() == 4);
 
-        // Fast exact homography from the unit square
-        // (0,0), (1,0), (1,1), (0,1) to a quadrilateral.
-        //
-        // cv::getPerspectiveTransform() solves a generic 8x8 system.
-        // Here the source points are always the same unit square, so the
-        // closed-form solution avoids that repeated generic solve.
+        // Homography from the unit square without the generic 8x8 solve.
         const double x0 = static_cast<double>(out[0].x);
         const double y0 = static_cast<double>(out[0].y);
         const double x1 = static_cast<double>(out[1].x);
@@ -63,9 +58,7 @@ struct Homographer{
             dx1 * dy2 -
             dx2 * dy1;
 
-        // Candidate contours are expected to be valid convex quads.
-        // Keep the generic OpenCV path only as a safety fallback for an
-        // extremely degenerate numerical case.
+        // Fall back to OpenCV for degenerate quadrilaterals.
         if (std::abs(denominator) <=
             std::numeric_limits<double>::epsilon())
         {
@@ -235,20 +228,18 @@ void assignClass(const cv::Mat &im, std::vector<cv::KeyPoint>& kpoints, float si
     }
 }
 
-/**
- * @brief The Markers that belong to the fractal marker
- */
-class PrismaMarker : public std::vector<cv::Point2f>
+// Binary pattern of one PRISMarker level.
+class Marker : public std::vector<cv::Point2f>
 {
 public:
-    PrismaMarker(int id, cv::Mat m, std::vector<cv::Point3f> corners, std::vector<int> id_submarkers);
-    PrismaMarker(){};
+    Marker(int id, cv::Mat m, std::vector<cv::Point3f> corners, std::vector<int> id_submarkers);
+    Marker(){};
 
     inline int nBits() const { return static_cast<int>(_M.total()); }
     inline cv::Mat mat() const { return _M; }
     inline cv::Mat mask() const { return _mask; }
     inline const std::vector<int>& subMarkers() const { return _submarkers; }
-    void addSubFractalMarker(PrismaMarker submarker);
+    void addInner(Marker submarker);
     // Marker side length.
     inline float getMarkerSize() const
     {
@@ -267,7 +258,7 @@ private:
 };
 
 
-PrismaMarker::PrismaMarker(int _id, cv::Mat m, std::vector<cv::Point3f> corners, std::vector<int> id_submarkers)
+Marker::Marker(int _id, cv::Mat m, std::vector<cv::Point3f> corners, std::vector<int> id_submarkers)
 {
     this->id = _id;
     this->_M = m;
@@ -277,7 +268,7 @@ PrismaMarker::PrismaMarker(int _id, cv::Mat m, std::vector<cv::Point3f> corners,
     _mask = cv::Mat::ones(m.size(), CV_8UC1);
 }
 
-std::vector<cv::KeyPoint> PrismaMarker::getKeypts()
+std::vector<cv::KeyPoint> Marker::getKeypts()
 {
     if(keypts.size() > 4) return keypts;
 
@@ -314,7 +305,7 @@ std::vector<cv::KeyPoint> PrismaMarker::getKeypts()
     return keypts;
 }
 
-void PrismaMarker::addSubFractalMarker(PrismaMarker submarker)
+void Marker::addInner(Marker submarker)
 {
     int nBitsSqrt= sqrt(nBits());
     float bitSize = getMarkerSize() / (nBitsSqrt+2.0f);
@@ -332,7 +323,7 @@ void PrismaMarker::addSubFractalMarker(PrismaMarker submarker)
     }
 }
 
-void PrismaMarker::applyMask(const cv::Mat& extraMask)
+void Marker::applyMask(const cv::Mat& extraMask)
 {
     if (extraMask.empty() || extraMask.size() != _mask.size())
         return;
@@ -343,10 +334,8 @@ void PrismaMarker::applyMask(const cv::Mat& extraMask)
         keypts.resize(4);
 }
 
-/**
- * @brief The FractalMarkerSet configurations
- */
-class FractalMarkerSet
+// Geometry and auxiliary ArUcos of a PRISMarker.
+class MarkerSet
 {
 public:
     struct ArucoInfo
@@ -355,19 +344,19 @@ public:
         int dictId = -1;
         std::vector<cv::Point3f> corners;
     };
-    FractalMarkerSet()
+    MarkerSet()
     {
         mInfoType = 2;   // NORM
         idExternal = 0;
     }
-    // Markers by id.
-    std::map<int, PrismaMarker> fractalMarkerCollection;
+    // Levels by id.
+    std::map<int, Marker> levels;
     // Marker ids grouped by bit count.
     std::map<int, std::vector<int>> bits_ids;
-    // YAML ArUco data.
-    std::map<int, ArucoInfo> innerAruco;          // fractal id
+    // Auxiliary ArUco data.
+    std::map<int, ArucoInfo> innerAruco;          // marker id
     std::map<int, ArucoInfo> cornerAruco;         // corner id
-    // Create settings.
+    // Per-level layout.
     std::vector<std::array<int, 4>> cornerIds;             // per level
     std::vector<int> cornerBits;                    // cells per level
     std::vector<cv::aruco2::PrismaLayout> cornerLayouts;
@@ -585,7 +574,7 @@ static bool hitsCell(
            y1 < b.y2 && y2 > b.y1;
 }
 static std::array<cv::Point3f, 4> blockCorners(
-    const PrismaMarker& marker,
+    const Marker& marker,
     const ArucoBlock& b
 )
 {
@@ -607,11 +596,10 @@ static std::array<cv::Point3f, 4> blockCorners(
 
 struct DetectedAruco
 {
-    // Id in the low-level SEARCH space. PData translates it to the
-    // owning PRISMarker/internal ArUco through prepared.arucoBySearchId.
+    // Search id; PData maps it to the owning PRISMarker.
     int searchId = -1;
 
-    // The only per-frame geometry produced by low-level detection.
+    // Image corners returned by the low-level detector.
     std::vector<cv::Point2f> imgCorners;
 };
 
@@ -644,8 +632,7 @@ struct ArucoRef
     std::vector<cv::Point3f> reserveObjCorners;
 };
 
-// Minimal definition needed by the low-level ArUco search.
-// Semantic/model data remains exclusively in ArucoRef.
+// ArUco entry for low-level search.
 struct ArucoSearchTarget
 {
     int dictId = -1;
@@ -658,26 +645,26 @@ struct SquareCandidate
 {
     SquareCandidate(
         std::vector<cv::Point2f> value,
-        bool canBeFractal
+        bool canBeLevel
     )
         : corners(std::move(value)),
           homography(corners),
-          fractalCandidate(canBeFractal)
+          levelCandidate(canBeLevel)
     {
     }
 
     std::vector<cv::Point2f> corners;
     Homographer homography;
-    bool fractalCandidate = false;
+    bool levelCandidate = false;
 };
 
-struct PrismaDetectionContext
+struct DetectionContext
 {
     cv::Mat gray;
     std::vector<SquareCandidate> squares;
 };
 
-static constexpr int kMinFractalContourPoints = 120;
+static constexpr int kMinLevelContourPoints = 120;
 
 struct DetectionEvidence
 {
@@ -777,13 +764,13 @@ static cv::Point3f bilinearPoint(
 
 static std::vector<cv::Point3f> removeOuterBorder(
     const std::vector<cv::Point3f>& corners,
-    int fullCellsWithExternalBorder
+    int outerCells
 )
 {
-    if (corners.size() != 4 || fullCellsWithExternalBorder <= 2)
+    if (corners.size() != 4 || outerCells <= 2)
         return corners;
 
-    float t = 1.f / static_cast<float>(fullCellsWithExternalBorder);
+    float t = 1.f / static_cast<float>(outerCells);
 
     return {
         bilinearPoint(corners, t,      t),
@@ -798,15 +785,15 @@ static bool cellHasAruco(
     int nVal,
     int row,
     int col,
-    const FractalMarkerSet& fmset
+    const MarkerSet& markerSet
 )
 {
     if (markerId < 0 ||
-        markerId >= static_cast<int>(fmset.cornerBits.size()) ||
-        markerId >= static_cast<int>(fmset.cornerIds.size()))
+        markerId >= static_cast<int>(markerSet.cornerBits.size()) ||
+        markerId >= static_cast<int>(markerSet.cornerIds.size()))
         return false;
 
-    int arucoCells = fmset.cornerBits[markerId];
+    int arucoCells = markerSet.cornerBits[markerId];
     if (arucoCells <= 0)
         return false;
 
@@ -815,20 +802,20 @@ static bool cellHasAruco(
 
     for (int slot = 0; slot < 4; slot++)
     {
-        int arucoId = fmset.cornerIds[markerId][slot];
+        int arucoId = markerSet.cornerIds[markerId][slot];
         if (arucoId < 0)
             continue;
 
         const cv::aruco2::PrismaLayout layout =
-            markerId < static_cast<int>(fmset.cornerLayouts.size())
-                ? fmset.cornerLayouts[markerId]
+            markerId < static_cast<int>(markerSet.cornerLayouts.size())
+                ? markerSet.cornerLayouts[markerId]
                 : cv::aruco2::PRISMA_LAYOUT_CORNERS;
 
         ArucoBlock b =
             makeBlock(
                 markerId,
                 layout,
-                fmset.cornerDictName,
+                markerSet.cornerDictName,
                 nVal,
                 arucoCells,
                 slot,
@@ -844,7 +831,7 @@ static bool cellHasAruco(
 
 // Ignore ArUco cells in the mask.
 static bool toMarkerGrid(
-    const PrismaMarker& marker,
+    const Marker& marker,
     int fullCells,
     const cv::Point3f& p,
     double& gx,
@@ -919,7 +906,7 @@ static void clearRect(
 }
 
 static void clearQuad(
-    const PrismaMarker& marker,
+    const Marker& marker,
     cv::Mat& validMask,
     const std::array<cv::Point3f, 4>& quad
 )
@@ -958,9 +945,9 @@ static void clearQuad(
 }
 
 static void clearAruco(
-    const PrismaMarker& marker,
+    const Marker& marker,
     cv::Mat& validMask,
-    const FractalMarkerSet::ArucoInfo& info
+    const MarkerSet::ArucoInfo& info
 )
 {
     if (info.corners.size() != 4)
@@ -981,9 +968,9 @@ static void clearAruco(
 }
 
 static void clearArucoBlock(
-    const PrismaMarker& marker,
+    const Marker& marker,
     cv::Mat& validMask,
-    const PrismaMarker& ownerMarker,
+    const Marker& ownerMarker,
     int ownerMarkerId,
     cv::aruco2::PrismaLayout layout,
     const std::string& dictName,
@@ -1018,21 +1005,21 @@ static void clearArucoBlock(
 }
 
 static void applyArucoMask(
-    const PrismaMarker& marker,
-    const FractalMarkerSet& fmset,
+    const Marker& marker,
+    const MarkerSet& markerSet,
     cv::Mat& validMask
 )
 {
     if (validMask.empty())
         return;
 
-    bool usedCompactCornerDefinition = false;
+    bool hasCornerLayout = false;
 
     // Use the compact level geometry when it is available.
     const size_t levels =
         std::min(
-            fmset.cornerIds.size(),
-            fmset.cornerBits.size()
+            markerSet.cornerIds.size(),
+            markerSet.cornerBits.size()
         );
 
     for (size_t level = 0; level < levels; level++)
@@ -1041,13 +1028,13 @@ static void applyArucoMask(
             static_cast<int>(level);
 
         auto itOwner =
-            fmset.fractalMarkerCollection.find(ownerMarkerId);
+            markerSet.levels.find(ownerMarkerId);
 
-        if (itOwner == fmset.fractalMarkerCollection.end())
+        if (itOwner == markerSet.levels.end())
             continue;
 
         const int arucoCells =
-            fmset.cornerBits[level];
+            markerSet.cornerBits[level];
 
         if (arucoCells <= 0)
             continue;
@@ -1055,14 +1042,14 @@ static void applyArucoMask(
         for (int slot = 0; slot < 4; slot++)
         {
             const int arucoId =
-                fmset.cornerIds[level][slot];
+                markerSet.cornerIds[level][slot];
 
             if (arucoId < 0)
                 continue;
 
             const cv::aruco2::PrismaLayout layout =
-                level < fmset.cornerLayouts.size()
-                    ? fmset.cornerLayouts[level]
+                level < markerSet.cornerLayouts.size()
+                    ? markerSet.cornerLayouts[level]
                     : cv::aruco2::PRISMA_LAYOUT_CORNERS;
 
             clearArucoBlock(
@@ -1071,20 +1058,20 @@ static void applyArucoMask(
                 itOwner->second,
                 ownerMarkerId,
                 layout,
-                fmset.cornerDictName,
+                markerSet.cornerDictName,
                 arucoCells,
                 slot,
                 arucoId
             );
 
-            usedCompactCornerDefinition = true;
+            hasCornerLayout = true;
         }
     }
 
     // Support older YAML corner data.
-    if (!usedCompactCornerDefinition)
+    if (!hasCornerLayout)
     {
-        for (const auto& item : fmset.cornerAruco)
+        for (const auto& item : markerSet.cornerAruco)
         {
             clearAruco(
                 marker,
@@ -1095,7 +1082,7 @@ static void applyArucoMask(
     }
 
     // Mask inner ArUcos too.
-    for (const auto& item : fmset.innerAruco)
+    for (const auto& item : markerSet.innerAruco)
     {
         clearAruco(
             marker,
@@ -1106,8 +1093,8 @@ static void applyArucoMask(
 }
 
 static void makeRef(
-    const PrismaMarker& fm,
-    const FractalMarkerSet& fmset,
+    const Marker& fm,
+    const MarkerSet& markerSet,
     cv::Mat& reference,
     cv::Mat& validMask
 )
@@ -1162,7 +1149,7 @@ static void makeRef(
                     nVal,
                     y,
                     x,
-                    fmset
+                    markerSet
                 ))
             {
                 validRow[x] = 0;
@@ -1173,7 +1160,7 @@ static void makeRef(
     // Ignore ArUcos from the other levels.
     applyArucoMask(
         fm,
-        fmset,
+        markerSet,
         validMask
     );
 }
@@ -1185,12 +1172,12 @@ static int innerKey(int markerId)
 }
 
 static std::vector<ArucoRef> makeArucoRefs(
-    const FractalMarkerSet& fmset,
+    const MarkerSet& markerSet,
     std::map<int, cv::aruco2::Dictionary>& dictionaryCache
 )
 {
     std::vector<ArucoRef> targets;
-    targets.reserve(fmset.innerAruco.size() + fmset.cornerAruco.size());
+    targets.reserve(markerSet.innerAruco.size() + markerSet.cornerAruco.size());
 
     auto getCachedDictionary =
         [&](cv::aruco2::DictionaryType dictionary)
@@ -1214,7 +1201,7 @@ static std::vector<ArucoRef> makeArucoRefs(
 
     auto addTarget =
         [&](int internalId,
-            const FractalMarkerSet::ArucoInfo& info,
+            const MarkerSet::ArucoInfo& info,
             bool isCentral)
         {
             if (info.dictId < 0 ||
@@ -1271,7 +1258,7 @@ static std::vector<ArucoRef> makeArucoRefs(
                 255.0
             );
 
-            const int fullCellsWithExternalBorder =
+            const int outerCells =
                 markerSize + 4;
 
             ArucoRef target;
@@ -1288,12 +1275,12 @@ static std::vector<ArucoRef> makeArucoRefs(
             }
             else
             {
-                target.fullCells = fullCellsWithExternalBorder;
+                target.fullCells = outerCells;
                 target.reserveObjCorners = info.corners;
                 target.objCorners =
                     removeOuterBorder(
                         info.corners,
-                        fullCellsWithExternalBorder
+                        outerCells
                     );
             }
 
@@ -1302,10 +1289,10 @@ static std::vector<ArucoRef> makeArucoRefs(
             );
         };
 
-    for (const auto& item : fmset.innerAruco)
+    for (const auto& item : markerSet.innerAruco)
         addTarget(innerKey(item.first), item.second, true);
 
-    for (const auto& item : fmset.cornerAruco)
+    for (const auto& item : markerSet.cornerAruco)
         addTarget(item.first, item.second, false);
 
     return targets;
@@ -1413,9 +1400,7 @@ static int adaptiveSubpixHalf(double cellExtentPx)
     if (!std::isfinite(cellExtentPx) || cellExtentPx <= 0.0)
         return kMinSubpixHalf;
 
-    // With small cells a 3x3 window has too little gradient after blur;
-    // the neighbouring corner is one full cell away, so the window can grow
-    // up to 0.6 of the cell.
+    // Adapt the subpixel window to cell size (at most 0.6 cells).
     const int scaled = std::max(
         kMinSubpixHalf,
         static_cast<int>(std::lround(cellExtentPx * 0.4))
@@ -1457,7 +1442,7 @@ static bool finitePoint(const cv::Point2f& point)
     return std::isfinite(point.x) && std::isfinite(point.y);
 }
 
-static cv::Size subpixWindowFromCellVectors(
+static cv::Size cellSubpixWindow(
     const cv::Point2f& cellX,
     const cv::Point2f& cellY
 )
@@ -1506,13 +1491,13 @@ static cv::Size localSubpixWindow(
         return cv::Size(kMinSubpixHalf, kMinSubpixHalf);
     }
 
-    return subpixWindowFromCellVectors(
+    return cellSubpixWindow(
         right - left,
         bottom - top
     );
 }
 
-static bool projectHomographyPoint(
+static bool projectPoint(
     const cv::Mat& homography,
     const cv::Point2f& point,
     cv::Point2f& projected
@@ -1553,7 +1538,7 @@ static bool projectHomographyPoint(
     {
         cv::Mat converted;
         homography.convertTo(converted, CV_64F);
-        return projectHomographyPoint(
+        return projectPoint(
             converted,
             point,
             projected
@@ -1602,19 +1587,19 @@ static cv::Size localSubpixWindow(
     cv::Point2f top;
     cv::Point2f bottom;
 
-    if (!projectHomographyPoint(
+    if (!projectPoint(
             homography,
             cv::Point2f(point.x - halfX, point.y),
             left) ||
-        !projectHomographyPoint(
+        !projectPoint(
             homography,
             cv::Point2f(point.x + halfX, point.y),
             right) ||
-        !projectHomographyPoint(
+        !projectPoint(
             homography,
             cv::Point2f(point.x, point.y - halfY),
             top) ||
-        !projectHomographyPoint(
+        !projectPoint(
             homography,
             cv::Point2f(point.x, point.y + halfY),
             bottom))
@@ -1622,7 +1607,7 @@ static cv::Size localSubpixWindow(
         return cv::Size(kMinSubpixHalf, kMinSubpixHalf);
     }
 
-    return subpixWindowFromCellVectors(
+    return cellSubpixWindow(
         right - left,
         bottom - top
     );
@@ -2096,16 +2081,16 @@ static double levelThres(const cv::Size& imageSize)
 }
 
 static bool modelPts(
-    const FractalMarkerSet& model,
+    const MarkerSet& model,
     int levelId,
     std::vector<cv::Point2f>& corners
 )
 {
     corners.clear();
 
-    const auto it = model.fractalMarkerCollection.find(levelId);
+    const auto it = model.levels.find(levelId);
 
-    if (it == model.fractalMarkerCollection.end())
+    if (it == model.levels.end())
         return false;
 
     const auto& keypoints = it->second.getKeyptsRef();
@@ -2122,7 +2107,7 @@ static bool modelPts(
 }
 
 static bool levelPts(
-    const PrismaMarker& level,
+    const Marker& level,
     std::vector<cv::Point2f>& corners
 )
 {
@@ -2136,8 +2121,8 @@ static bool levelPts(
 }
 
 static bool levelFits(
-    const FractalMarkerSet& model,
-    const PrismaMarker& detectedLevel,
+    const MarkerSet& model,
+    const Marker& detectedLevel,
     const cv::Mat& homography,
     double threshold,
     double* meanErrorOut = nullptr
@@ -2196,27 +2181,26 @@ struct MarkerRef
     cv::Mat validMask;
 };
 
-// Scratch storage reused by all auxiliary ArUco candidates in one frame.
-// This changes only memory reuse: values are overwritten before every use.
+// Per-frame buffers for ArUco decoding.
 struct ArucoDecodeWorkspace
 {
     cv::Mat bits;
     cv::Mat bitAdaptive;
 };
 
-struct FractalHashEntry
+struct HashEntry
 {
     std::size_t ordinal = 0;
 };
 
-struct FractalHashIndex
+struct HashIndex
 {
     cv::Mat hashMask;
     bool exactKey = false;
 
     std::unordered_map<
         std::uint64_t,
-        std::vector<FractalHashEntry>
+        std::vector<HashEntry>
     > table;
 };
 
@@ -2247,23 +2231,23 @@ static std::uint64_t packMaskedBits64(
 }
 
 // PRISMarker detector.
-class PrismaDetector
+class Detector
 {
 public:
-    //Load search data
+    // Prepare search data.
     void setParams(
-        const FractalMarkerSet& set,
+        const MarkerSet& set,
         const std::vector<ArucoSearchTarget>& arucoTargets
     );
 
-    PrismaDetectionContext extractCandidates(const cv::Mat& img) const;
-    DetectionEvidence detect(PrismaDetectionContext& context);
+    DetectionContext extractCandidates(const cv::Mat& img) const;
+    DetectionEvidence detect(DetectionContext& context);
 
 private:
     std::map<int, std::vector<MarkerRef>> markersBySize;
-    std::map<int, FractalHashIndex> fractalHashBySize;
+    std::map<int, HashIndex> hashBySize;
 
-    void rebuildFractalHashIndex();
+    void rebuildHash();
 
     std::vector<std::pair<int, int>> findMarkersLinear(
         const cv::Mat& bits
@@ -2272,8 +2256,7 @@ private:
     // Number of entries in the ArUco SEARCH space.
     std::size_t arucoSearchCount = 0;
 
-    // ArUco dictionaries used by the selected PRISMarker dictionary.
-    // The dictionary objects are prepared once and reused on every frame.
+    // Reuse auxiliary ArUco dictionaries between frames.
     std::vector<cv::aruco2::DictionaryType> arucoDictionaries;
     std::map<int, cv::aruco2::Dictionary> arucoDictionaryData;
 
@@ -2304,7 +2287,7 @@ private:
         const std::vector<cv::Point2f>& a
     );
 
-    static std::vector<std::vector<cv::Point>> visitedAwareTracingContour(
+    static std::vector<std::vector<cv::Point>> traceContours(
         cv::Mat& binary,
         std::size_t minSize,
         float maxRevisited
@@ -2347,13 +2330,13 @@ private:
     );
 };
 
-void PrismaDetector::setParams(
-    const FractalMarkerSet& model,
+void Detector::setParams(
+    const MarkerSet& model,
     const std::vector<ArucoSearchTarget>& arucoTargets
 )
 {
     markersBySize.clear();
-    fractalHashBySize.clear();
+    hashBySize.clear();
     arucoDictionaries.clear();
     arucoDictionaryData.clear();
     arucoSearchIdsById.clear();
@@ -2389,8 +2372,8 @@ void PrismaDetector::setParams(
         }
     }
 
-    auto addFractalRef =
-        [&](int markerId, const PrismaMarker& marker)
+    auto addLevelRef =
+        [&](int markerId, const Marker& marker)
         {
             MarkerRef ref;
             ref.id = markerId;
@@ -2412,7 +2395,7 @@ void PrismaDetector::setParams(
                 markersBySize[ref.cells].push_back(std::move(ref));
         };
 
-    // Keep the original indexed path for legacy FractalMarkerSet objects.
+    // Reuse indexed marker data when available.
     if (!model.bits_ids.empty())
     {
         for (const auto& group : model.bits_ids)
@@ -2420,28 +2403,28 @@ void PrismaDetector::setParams(
             for (int markerId : group.second)
             {
                 const auto it =
-                    model.fractalMarkerCollection.find(markerId);
+                    model.levels.find(markerId);
 
-                if (it == model.fractalMarkerCollection.end())
+                if (it == model.levels.end())
                     continue;
 
-                addFractalRef(markerId, it->second);
+                addLevelRef(markerId, it->second);
             }
         }
 
     }
     else
     {
-        for (const auto& item : model.fractalMarkerCollection)
-            addFractalRef(item.first, item.second);
+        for (const auto& item : model.levels)
+            addLevelRef(item.first, item.second);
     }
 
-    rebuildFractalHashIndex();
+    rebuildHash();
 }
 
-void PrismaDetector::rebuildFractalHashIndex()
+void Detector::rebuildHash()
 {
-    fractalHashBySize.clear();
+    hashBySize.clear();
 
     struct ScoredCell
     {
@@ -2547,7 +2530,7 @@ void PrismaDetector::rebuildFractalHashIndex()
                 static_cast<int>(candidates.size())
             );
 
-        FractalHashIndex index;
+        HashIndex index;
         index.hashMask =
             cv::Mat(
                 commonMask.size(),
@@ -2582,48 +2565,42 @@ void PrismaDetector::rebuildFractalHashIndex()
                 );
 
             index.table[key].push_back(
-                FractalHashEntry{ordinal}
+                HashEntry{ordinal}
             );
         }
 
-        fractalHashBySize.emplace(
+        hashBySize.emplace(
             cells,
             std::move(index)
         );
     }
 }
 
-std::vector<std::vector<cv::Point>> PrismaDetector::visitedAwareTracingContour(cv::Mat &padded_io, size_t minSize, float maxRevisited ) {
+std::vector<std::vector<cv::Point>> Detector::traceContours(cv::Mat &padded_io, size_t minSize, float maxRevisited ) {
     if (padded_io.empty() || padded_io.type() != CV_8UC1) return {};
-    // 1. Fast Initialization and Padding
+    // Clear the image border.
     int rows = padded_io.rows;
     int cols = padded_io.cols;
     int32_t step = padded_io.step;
     uchar* data = padded_io.data;
-    // Fast clear of top and bottom rows
     memset(data, 0, cols);
     memset(data + (rows - 1) * step, 0, cols);
-    // Fast clear of left and right columns
     for (int r = 1; r < rows - 1; ++r) {
         uchar* row_ptr = data + r * step;
         row_ptr[0] = 0;
         row_ptr[cols - 1] = 0;
     }
-    // 2. Precompute Neighbor Offsets based on image stride This removes the need for Point arithmetic in the loop
+    // 8-neighborhood offsets.
     const int offsets[16]={-1,-step-1,-step,-step+1,1,step+1,step,step-1, -1,-step-1,-step,-step+1,1,step+1,step,step-1, };
-    // Use static tables to avoid initialization overhead on every call // 8-connectivity offsets relative to center (0,0) // Order: W, NW, N, NE, E, SE, S, SW
     const int dx[8] = { -1, -1,  0,  1, 1, 1, 0, -1 }, dy[8] = {  0, -1, -1, -1, 0, 1, 1,  1 };
-    // Pre-allocate results
     std::vector<std::vector<cv::Point>> contours;contours.reserve(2048);
     std::vector<cv::Point> buffer;buffer.reserve(2048);
     const uchar FOREGROUND = 255, BACKGROUND = 0,VISITED = 100;
-    // 3. Scanning Loop
-    // We iterate using raw pointers for maximum speed
+    // Trace contours in-place.
     int rowStep=1;//std::max(1,int(minSize/6));
     for (int r = 1; r < rows - 1; r+=rowStep) {
         uchar* row_ptr = data + r * step;
         for (int c = 1; c < cols - 1;  ) {
-            ////findStartContourPoint
             {
 #if (CV_SIMD || CV_SIMD_SCALABLE)
                 cv::v_uint8 v_zero = cv::vx_setzero_u8();
@@ -2649,7 +2626,6 @@ std::vector<std::vector<cv::Point>> PrismaDetector::visitedAwareTracingContour(c
                 do {
                     buffer.emplace_back(curr_x, curr_y);// Add point
                     *curr_ptr = VISITED;// Mark as visited
-                    //showImage(padded);
                     // Search for next foreground pixel. We search 8 neighbors starting from search_idx
                     for (int i = 0; i < 8; ++i) {
                         int idx = search_idx + i; // index into offsets (0..15)
@@ -2672,7 +2648,6 @@ std::vector<std::vector<cv::Point>> PrismaDetector::visitedAwareTracingContour(c
                 }
             }
             c++;//move to next pixel
-            ////findEndContourPoint
             if ( row_ptr[c]){
                 {
 #if (CV_SIMD || CV_SIMD_SCALABLE)
@@ -2696,7 +2671,7 @@ std::vector<std::vector<cv::Point>> PrismaDetector::visitedAwareTracingContour(c
     return contours;
 }
 
-void PrismaDetector::thres255Adaptive(cv::Mat &in,cv::Mat &out,int off,int thres){
+void Detector::thres255Adaptive(cv::Mat &in,cv::Mat &out,int off,int thres){
     cv::boxFilter( in, out, in.type(), cv::Size(off*2+1, off*2+1),
                   cv::Point(-1,-1), true, 4 );
 
@@ -2710,7 +2685,7 @@ void PrismaDetector::thres255Adaptive(cv::Mat &in,cv::Mat &out,int off,int thres
 
 }
 
-int PrismaDetector::getBorderErrors(const cv::Mat &bits, int markerSize, int borderSize) {
+int Detector::getBorderErrors(const cv::Mat &bits, int markerSize, int borderSize) {
     int sizeWithBorders = markerSize + 2 * borderSize;
     int totalErrors = 0;
     for(int y = 0; y < sizeWithBorders; y++) {
@@ -2728,7 +2703,7 @@ int PrismaDetector::getBorderErrors(const cv::Mat &bits, int markerSize, int bor
     return totalErrors;
 }
 
-int PrismaDetector::getMarkerId(
+int Detector::getMarkerId(
     cv::Mat candidateBits,
     int& idx,
     int& nrotations,
@@ -2770,7 +2745,7 @@ int PrismaDetector::getMarkerId(
     return typ;
 }
 
-int PrismaDetector::isInto(const std::vector<cv::Point2f> &a, const std::vector<cv::Point2f> &b) {
+int Detector::isInto(const std::vector<cv::Point2f> &a, const std::vector<cv::Point2f> &b) {
     // Lambda for point-in-polygon test (Ray Casting)
     auto countInside = [](const std::vector<cv::Point2f>& source, const std::vector<cv::Point2f>& target) -> int {
         int count = 0;
@@ -2800,7 +2775,7 @@ int PrismaDetector::isInto(const std::vector<cv::Point2f> &a, const std::vector<
     return 0;
 }
 
-bool PrismaDetector::identifyArucoCandidate(
+bool Detector::identifyArucoCandidate(
     const SquareCandidate& square,
     const cv::Mat& gray,
     cv::aruco2::DictionaryType dictionaryType,
@@ -2976,11 +2951,11 @@ bool PrismaDetector::identifyArucoCandidate(
     return true;
 }
 
-PrismaDetectionContext PrismaDetector::extractCandidates(
+DetectionContext Detector::extractCandidates(
     const cv::Mat& img
 ) const
 {
-    PrismaDetectionContext context;
+    DetectionContext context;
     if (img.empty())
         return context;
 
@@ -3031,7 +3006,7 @@ PrismaDetectionContext PrismaDetector::extractCandidates(
         4 * arucoParams.minSize;
 
     contours =
-        visitedAwareTracingContour(
+        traceContours(
             thresImage,
             static_cast<std::size_t>(minSize4),
             arucoParams.maxTimesRevisited
@@ -3098,16 +3073,16 @@ PrismaDetectionContext PrismaDetector::extractCandidates(
             );
         }
 
-        // Same corner ordering as MarkerDetector::sort().
+        // Keep clockwise corner order.
         marker = sort(marker);
 
-        const bool fractalCandidate =
+        const bool levelCandidate =
             static_cast<int>(contours[i].size()) >=
-            kMinFractalContourPoints;
+            kMinLevelContourPoints;
 
         context.squares.emplace_back(
             std::move(marker),
-            fractalCandidate
+            levelCandidate
         );
     }
 
@@ -3115,7 +3090,7 @@ PrismaDetectionContext PrismaDetector::extractCandidates(
     return context;
 }
 
-cv::Mat PrismaDetector::getBits(
+cv::Mat Detector::getBits(
     const SquareCandidate& candidate,
     const cv::Mat& gray,
     int cells
@@ -3162,8 +3137,8 @@ cv::Mat PrismaDetector::getBits(
     return bits;
 }
 
-DetectionEvidence PrismaDetector::detect(
-    PrismaDetectionContext& context
+DetectionEvidence Detector::detect(
+    DetectionContext& context
 )
 {
     struct LevelCandidate
@@ -3199,7 +3174,7 @@ DetectionEvidence PrismaDetector::detect(
         SquareCandidate& square =
             context.squares[candidateIndex];
 
-        if (!square.fractalCandidate)
+        if (!square.levelCandidate)
             continue;
 
         for (const auto& group : markersBySize)
@@ -3243,7 +3218,7 @@ DetectionEvidence PrismaDetector::detect(
                 for (int corner = 0; corner < 4; ++corner)
                 {
                     windows.push_back(
-                        nanofractal::localSubpixWindow(
+                        prisma::localSubpixWindow(
                             square.homography,
                             normalizedCorners[corner],
                             cellStep,
@@ -3252,7 +3227,7 @@ DetectionEvidence PrismaDetector::detect(
                     );
                 }
 
-                nanofractal::refineSubpixGrouped(
+                prisma::refineSubpixGrouped(
                     context.gray,
                     square.corners,
                     windows,
@@ -3265,7 +3240,7 @@ DetectionEvidence PrismaDetector::detect(
                 );
 
                 square.homography =
-                    nanofractal::Homographer(square.corners);
+                    prisma::Homographer(square.corners);
             }
 
             for (const auto& match : matches)
@@ -3289,7 +3264,7 @@ DetectionEvidence PrismaDetector::detect(
                 );
             }
 
-            // Keep the first valid fractal-size match.
+            // Keep the first valid marker-size match.
             break;
         }
     }
@@ -3482,13 +3457,13 @@ DetectionEvidence PrismaDetector::detect(
             const double cellStep =
                 1.0 / static_cast<double>(std::max(2, fullCells));
 
-            nanofractal::Homographer hom(marker.corners);
+            prisma::Homographer hom(marker.corners);
 
             for (int corner = 0; corner < 4; ++corner)
             {
                 corners.push_back(marker.corners[corner]);
                 windows.push_back(
-                    nanofractal::localSubpixWindow(
+                    prisma::localSubpixWindow(
                         hom,
                         normalizedCorners[corner],
                         cellStep,
@@ -3499,7 +3474,7 @@ DetectionEvidence PrismaDetector::detect(
             }
         }
 
-        nanofractal::refineSubpixGrouped(
+        prisma::refineSubpixGrouped(
             context.gray,
             corners,
             windows,
@@ -3751,7 +3726,7 @@ DetectionEvidence PrismaDetector::detect(
     return evidence;
 }
 
-std::vector<std::pair<int, int>> PrismaDetector::findMarkersLinear(
+std::vector<std::pair<int, int>> Detector::findMarkersLinear(
     const cv::Mat& bits
 ) const
 {
@@ -3803,7 +3778,7 @@ std::vector<std::pair<int, int>> PrismaDetector::findMarkersLinear(
     return matches;
 }
 
-std::vector<std::pair<int, int>> PrismaDetector::findMarkers(
+std::vector<std::pair<int, int>> Detector::findMarkers(
     const cv::Mat& bits
 ) const
 {
@@ -3821,18 +3796,18 @@ std::vector<std::pair<int, int>> PrismaDetector::findMarkers(
         return {};
 
     const auto hashIt =
-        fractalHashBySize.find(bits.rows);
+        hashBySize.find(bits.rows);
 
     // If no common key could be built for this size, keep the original exact
     // linear path as a correctness fallback.
-    if (hashIt == fractalHashBySize.end() ||
+    if (hashIt == hashBySize.end() ||
         hashIt->second.hashMask.empty())
     {
         return findMarkersLinear(bits);
     }
 
     const std::vector<MarkerRef>& refs = refsIt->second;
-    const FractalHashIndex& index = hashIt->second;
+    const HashIndex& index = hashIt->second;
 
     std::vector<std::pair<int, int>> matches;
     std::set<int> found;
@@ -3853,7 +3828,7 @@ std::vector<std::pair<int, int>> PrismaDetector::findMarkers(
         {
             // Entries are stored in the same ordinal order used by the old
             // linear scan, so observable match ordering is preserved.
-            for (const FractalHashEntry& entry : bucketIt->second)
+            for (const HashEntry& entry : bucketIt->second)
             {
                 if (entry.ordinal >= refs.size())
                     continue;
@@ -3891,39 +3866,31 @@ std::vector<std::pair<int, int>> PrismaDetector::findMarkers(
     return matches;
 }
 
-float PrismaDetector::getSubpixelValue(const cv::Mat &im_grey, const cv::Point2f &p) {
-    // 1. Get integer coordinates
+float Detector::getSubpixelValue(const cv::Mat &im_grey, const cv::Point2f &p) {
+    // Bilinear interpolation.
     const int ix = static_cast<int>(p.x);
     const int iy = static_cast<int>(p.y);
 
 
-    //   Boundary Check: Ensure the 2x2 patch is within limits
-    // We check ix+1 and iy+1 because the interpolation looks at the next pixel over.
+    // A full 2x2 patch is required.
     if (ix < 0 || iy < 0 || ix >= im_grey.cols - 1 || iy >= im_grey.rows - 1) {
-        // Option A: Return a default value
-        // Option B: Clamp the point to the nearest valid boundary
         return 0.0f;
     }
 
-    // 2. Get fractional parts
     const float dx = p.x - ix;
     const float dy = p.y - iy;
-    // 3. Optimized Pointer Access
     const uchar* ptr = im_grey.ptr<uchar>(iy) + ix;
     const size_t step = im_grey.step;
-    // 4. Fetch the four pixels immediately as floats
     const float p00 = static_cast<float>(ptr[0]);        // Top-Left
     const float p01 = static_cast<float>(ptr[1]);        // Top-Right
     const float p10 = static_cast<float>(ptr[step]);     // Bottom-Left
     const float p11 = static_cast<float>(ptr[step + 1]); // Bottom-Right
-    // 5. Separable Interpolation (3 Multiplications total)
     const float top = p00 + dx * (p01 - p00);// Interpolate Top Row Horizontally
     const float bot = p10 + dx * (p11 - p10);    // Interpolate Bottom Row Horizontallys
-    // Interpolate Vertically between Top and Bottom results
     return top + dy * (bot - top);
 }
 
-std::vector<cv::Point2f> PrismaDetector::sort(
+std::vector<cv::Point2f> Detector::sort(
     const std::vector<cv::Point2f>& marker
 )
 {
@@ -3944,7 +3911,7 @@ std::vector<cv::Point2f> PrismaDetector::sort(
     return result;
 }
 
-double PrismaDetector::perimeter(
+double Detector::perimeter(
     const std::vector<cv::Point2f>& points
 )
 {
@@ -3964,8 +3931,8 @@ double PrismaDetector::perimeter(
 }
 
 static void addPosePoints(
-    const FractalMarkerSet& model,
-    const std::vector<PrismaMarker>& levels,
+    const MarkerSet& model,
+    const std::vector<Marker>& levels,
     const std::vector<ArucoHit>& arucos,
     const cv::Mat& homography,
     const cv::Mat& gray,
@@ -3985,9 +3952,9 @@ static void addPosePoints(
         if (!homography.empty())
         {
             for (const auto& item :
-                 model.fractalMarkerCollection)
+                 model.levels)
             {
-                const PrismaMarker& modelMarker = item.second;
+                const Marker& modelMarker = item.second;
                 const std::vector<cv::KeyPoint>& modelKeypoints =
                     modelMarker.getKeyptsRef();
 
@@ -4102,7 +4069,7 @@ static void addPosePoints(
                 }
                 else
                 {
-                    for (const PrismaMarker& detected : levels)
+                    for (const Marker& detected : levels)
                     {
                         if (detected.id != item.first)
                             continue;
@@ -4196,11 +4163,9 @@ static void addPosePoints(
     );
 }
 
-} // namespace nanofractal
+} // namespace prisma
 } // anonymous namespace
-// ---------------------------------------------------------------------------
-// cv::aruco2 wrappers
-// ---------------------------------------------------------------------------
+// PRISMarker public API.
 namespace cv {
 namespace aruco2 {
 // Predefined PRISMarkers
@@ -4363,7 +4328,7 @@ static std::vector<cv::Point3f> squareCorners(float side)
 }
 
 static std::array<cv::Point3f, 4> gridCorners(
-    const nanofractal::PrismaMarker& marker,
+    const prisma::Marker& marker,
     float x,
     float y,
     float width,
@@ -4405,12 +4370,12 @@ static std::array<cv::Point3f, 4> gridCorners(
 }
 
 static std::set<int> getUniqueArucoIds(
-    const std::vector<nanofractal::ArucoRef>& refs
+    const std::vector<prisma::ArucoRef>& refs
 )
 {
     std::map<std::pair<int, int>, int> counts;
 
-    for (const nanofractal::ArucoRef& ref : refs)
+    for (const prisma::ArucoRef& ref : refs)
     {
         counts[
             std::make_pair(
@@ -4422,7 +4387,7 @@ static std::set<int> getUniqueArucoIds(
 
     std::set<int> result;
 
-    for (const nanofractal::ArucoRef& ref : refs)
+    for (const prisma::ArucoRef& ref : refs)
     {
         const auto key =
             std::make_pair(
@@ -4622,7 +4587,7 @@ static cv::Mat drawPRISMarker(
 }
 
 static bool estimateCorners(
-    const nanofractal::FractalMarkerSet& model,
+    const prisma::MarkerSet& model,
     const std::vector<cv::Point3f>& objectPoints,
     const std::vector<cv::Point2f>& imagePoints,
     std::vector<cv::Point2f>& corners
@@ -4633,9 +4598,9 @@ static bool estimateCorners(
     if (objectPoints.size() < 4 || objectPoints.size() != imagePoints.size())
         return false;
 
-    const auto outerIt = model.fractalMarkerCollection.find(model.idExternal);
+    const auto outerIt = model.levels.find(model.idExternal);
 
-    if (outerIt == model.fractalMarkerCollection.end() ||
+    if (outerIt == model.levels.end() ||
         outerIt->second.keypts.size() < 4)
     {
         return false;
@@ -4746,8 +4711,8 @@ struct MarkerState
 {
     int id = -1;
 
-    std::vector<nanofractal::PrismaMarker> levels;
-    std::vector<nanofractal::ArucoHit> arucos;
+    std::vector<prisma::Marker> levels;
+    std::vector<prisma::ArucoHit> arucos;
 
     cv::Mat homography;
     std::vector<cv::Point3f> objPoints;
@@ -4825,7 +4790,7 @@ constexpr double kMinRefineShift = 1.5;
 constexpr double kMaxRefineShift = 3.0;
 
 // Projected size of one ArUco cell, in pixels.
-inline double arucoCellPx(const nanofractal::ArucoHit& aruco)
+inline double arucoCellPx(const prisma::ArucoHit& aruco)
 {
     double sideSum = 0.0;
 
@@ -4933,7 +4898,7 @@ inline bool addTarget(
 
     cellSizePx = cellSize(cellSizePx);
     const cv::Size safeSubpixWindow =
-        nanofractal::clampSubpixWindow(subpixWindow);
+        prisma::clampSubpixWindow(subpixWindow);
 
     const int margin = std::max(
         {
@@ -4982,7 +4947,7 @@ inline bool addTarget(
 }
 
 inline bool projectLevel(
-    const nanofractal::PrismaMarker& marker,
+    const prisma::Marker& marker,
     const cv::Mat& homography,
     std::vector<cv::Point2f>& modelPoints,
     std::vector<cv::Point2f>& imagePoints,
@@ -5061,7 +5026,7 @@ inline bool insideRegion(
 }
 
 inline std::vector<std::vector<cv::Point2f>> modelArucoAreas(
-    const std::map<int, nanofractal::ArucoRef>& arucos
+    const std::map<int, prisma::ArucoRef>& arucos
 )
 {
     std::vector<std::vector<cv::Point2f>> regions;
@@ -5069,7 +5034,7 @@ inline std::vector<std::vector<cv::Point2f>> modelArucoAreas(
 
     for (const auto& item : arucos)
     {
-        const nanofractal::ArucoRef& aruco = item.second;
+        const prisma::ArucoRef& aruco = item.second;
         const auto& corners = aruco.reserveObjCorners.size() == 4
             ? aruco.reserveObjCorners
             : aruco.objCorners;
@@ -5088,20 +5053,20 @@ inline std::vector<std::vector<cv::Point2f>> modelArucoAreas(
 }
 
 inline std::vector<std::vector<cv::Point2f>> imageArucoAreas(
-    const std::vector<nanofractal::ArucoHit>& arucos
+    const std::vector<prisma::ArucoHit>& arucos
 )
 {
     std::vector<std::vector<cv::Point2f>> regions;
     regions.reserve(arucos.size());
 
-    for (const nanofractal::ArucoHit& aruco : arucos)
+    for (const prisma::ArucoHit& aruco : arucos)
     {
         if (aruco.imgCorners.size() != 4)
             continue;
 
         std::vector<cv::Point2f> polygon =
             aruco.reserveObjCorners.size() == 4
-                ? nanofractal::reservePts(aruco)
+                ? prisma::reservePts(aruco)
                 : aruco.imgCorners;
 
         if (polygon.size() == 4)
@@ -5206,14 +5171,14 @@ struct LevelObservation
 {
     int markerId = -1;
     bool canStart = false;
-    nanofractal::PrismaMarker level;
+    prisma::Marker level;
 };
 
 struct ArucoObservation
 {
     int markerId = -1;
     bool canStart = false;
-    nanofractal::ArucoHit aruco;
+    prisma::ArucoHit aruco;
 };
 
 struct DetectionObservations
@@ -5250,8 +5215,8 @@ struct PrismaDetector::PData
     // Geometry and semantic data prepared once for one complete PRISMarker.
     struct MarkerModel
     {
-        nanofractal::FractalMarkerSet geometry;
-        std::map<int, nanofractal::ArucoRef> arucosByInternalId;
+        prisma::MarkerSet geometry;
+        std::map<int, prisma::ArucoRef> arucosByInternalId;
         std::set<int> uniqueArucoIds;
 
         // Model-space corners are dictionary data, so compute them only once.
@@ -5272,10 +5237,10 @@ struct PrismaDetector::PData
     PrismaDict type =
         static_cast<PrismaDict>(-1);
 
-    // Low-level detector prepared once and reused on every frame.
-    nanofractal::PrismaDetector detector;
+    // Low-level detector, reused between frames.
+    prisma::Detector detector;
 
-    // Dictionary data already converted to detection-ready structures.
+    // Prepared dictionary.
     PreparedDictionary prepared;
 
     bool loaded() const
@@ -5286,21 +5251,19 @@ struct PrismaDetector::PData
 
     void load(PrismaDict newType);
 
-    // Per-frame entry point. It keeps the public detect() method minimal
-    // and owns the complete internal detection pipeline.
+    // Per-frame detection pipeline.
     std::vector<PrismaMarker> detectFrame(
         const cv::Mat& image,
         bool pose
     );
 
 private:
-    // Boundary between the generic low-level detector and PRISMarker semantics.
+    // Map low-level detections to PRISMarker observations.
     DetectionObservations makeObservations(
-        const nanofractal::DetectionEvidence& evidence
+        const prisma::DetectionEvidence& evidence
     ) const;
 
-    // Seeds are an implementation detail of validation, not a public
-    // detection stage.
+    // Internal candidate hypotheses.
     std::vector<InstanceSeed> makeSeeds(
         const DetectionObservations& observations
     ) const;
@@ -5357,21 +5320,21 @@ private:
         bool pose
     ) const;
 
-    static nanofractal::FractalMarkerSet buildModel(
+    static prisma::MarkerSet buildModel(
         const PMark& mark,
         DictionaryType arucoDict
     );
 
     static PreparedDictionary prepareDictionary(
         const PDict& dict,
-        nanofractal::FractalMarkerSet& search,
-        std::vector<nanofractal::ArucoSearchTarget>& arucoSearchTargets
+        prisma::MarkerSet& search,
+        std::vector<prisma::ArucoSearchTarget>& arucoSearchTargets
     );
 
-    static void addMarkerToPreparedDictionary(
+    static void addMarker(
         PreparedDictionary& out,
-        nanofractal::FractalMarkerSet& search,
-        std::vector<nanofractal::ArucoSearchTarget>& arucoSearchTargets,
+        prisma::MarkerSet& search,
+        std::vector<prisma::ArucoSearchTarget>& arucoSearchTargets,
         std::map<int, cv::aruco2::Dictionary>& arucoDictionaryCache,
         const PMark& mark,
         DictionaryType arucoDict,
@@ -5423,12 +5386,12 @@ private:
     ) const;
 };
 
-nanofractal::FractalMarkerSet PrismaDetector::PData::buildModel(
+prisma::MarkerSet PrismaDetector::PData::buildModel(
     const PMark& mark,
     DictionaryType arucoDict
 )
 {
-    nanofractal::FractalMarkerSet markerSet;
+    prisma::MarkerSet markerSet;
     markerSet.mInfoType = 2;
     markerSet.idExternal = 0;
 
@@ -5446,7 +5409,7 @@ nanofractal::FractalMarkerSet PrismaDetector::PData::buildModel(
         if (levelIndex + 1 < static_cast<int>(mark.levels.size()))
             submarkers.push_back(levelIndex + 1);
 
-        nanofractal::PrismaMarker marker(
+        prisma::Marker marker(
             levelIndex,
             bitsToMat(level),
             squareCorners(markerSide),
@@ -5457,7 +5420,7 @@ nanofractal::FractalMarkerSet PrismaDetector::PData::buildModel(
             levelIndex + 1 == static_cast<int>(mark.levels.size());
 
         marker.applyMask(levelMask(level, innermost));
-        markerSet.fractalMarkerCollection[levelIndex] = std::move(marker);
+        markerSet.levels[levelIndex] = std::move(marker);
 
         if (!innermost)
         {
@@ -5475,13 +5438,13 @@ nanofractal::FractalMarkerSet PrismaDetector::PData::buildModel(
          ++levelIndex)
     {
         const PLevel& level = mark.levels[levelIndex];
-        nanofractal::PrismaMarker& marker =
-            markerSet.fractalMarkerCollection.at(levelIndex);
+        prisma::Marker& marker =
+            markerSet.levels.at(levelIndex);
 
         if (levelIndex + 1 < static_cast<int>(mark.levels.size()))
         {
-            marker.addSubFractalMarker(
-                markerSet.fractalMarkerCollection.at(levelIndex + 1)
+            marker.addInner(
+                markerSet.levels.at(levelIndex + 1)
             );
         }
 
@@ -5499,7 +5462,7 @@ nanofractal::FractalMarkerSet PrismaDetector::PData::buildModel(
                 static_cast<float>(kPrismaReservationCells)
             );
 
-            nanofractal::FractalMarkerSet::ArucoInfo info;
+            prisma::MarkerSet::ArucoInfo info;
             info.dictName = arucoName;
             info.dictId = level.aruco[slot];
             info.corners.assign(corners.begin(), corners.end());
@@ -5522,7 +5485,7 @@ nanofractal::FractalMarkerSet PrismaDetector::PData::buildModel(
                 static_cast<float>(centralCells)
             );
 
-            nanofractal::FractalMarkerSet::ArucoInfo info;
+            prisma::MarkerSet::ArucoInfo info;
             info.dictName = arucoName;
             info.dictId = mark.center;
             info.corners.assign(corners.begin(), corners.end());
@@ -5537,10 +5500,10 @@ nanofractal::FractalMarkerSet PrismaDetector::PData::buildModel(
     return markerSet;
 }
 
-void PrismaDetector::PData::addMarkerToPreparedDictionary(
+void PrismaDetector::PData::addMarker(
     PreparedDictionary& out,
-    nanofractal::FractalMarkerSet& search,
-    std::vector<nanofractal::ArucoSearchTarget>& arucoSearchTargets,
+    prisma::MarkerSet& search,
+    std::vector<prisma::ArucoSearchTarget>& arucoSearchTargets,
     std::map<int, cv::aruco2::Dictionary>& arucoDictionaryCache,
     const PMark& mark,
     DictionaryType arucoDict,
@@ -5552,12 +5515,12 @@ void PrismaDetector::PData::addMarkerToPreparedDictionary(
         return;
 
 
-    nanofractal::FractalMarkerSet full =
+    prisma::MarkerSet full =
         buildModel(mark, arucoDict);
 
 
-    const std::vector<nanofractal::ArucoRef> refs =
-        nanofractal::makeArucoRefs(
+    const std::vector<prisma::ArucoRef> refs =
+        prisma::makeArucoRefs(
             full,
             arucoDictionaryCache
         );
@@ -5566,15 +5529,15 @@ void PrismaDetector::PData::addMarkerToPreparedDictionary(
     MarkerModel model;
     model.uniqueArucoIds = getUniqueArucoIds(refs);
 
-    for (const nanofractal::ArucoRef& ref : refs)
+    for (const prisma::ArucoRef& ref : refs)
         model.arucosByInternalId[ref.internalId] = ref;
 
 
-    for (const auto& item : full.fractalMarkerCollection)
+    for (const auto& item : full.levels)
     {
         std::vector<cv::Point2f> corners;
 
-        if (nanofractal::modelPts(full, item.first, corners) &&
+        if (prisma::modelPts(full, item.first, corners) &&
             corners.size() == 4)
         {
             model.planeCornersByLevel[item.first] =
@@ -5592,7 +5555,7 @@ void PrismaDetector::PData::addMarkerToPreparedDictionary(
         const int searchId =
             static_cast<int>(out.levelBySearchId.size());
 
-        nanofractal::PrismaMarker candidate(
+        prisma::Marker candidate(
             searchId,
             bitsToMat(level),
             searchCorners,
@@ -5603,7 +5566,7 @@ void PrismaDetector::PData::addMarkerToPreparedDictionary(
         candidate.applyMask(levelMask(level, true));
         candidate.getKeypts();
 
-        search.fractalMarkerCollection[
+        search.levels[
             searchId
         ] = std::move(candidate);
 
@@ -5618,7 +5581,7 @@ void PrismaDetector::PData::addMarkerToPreparedDictionary(
 
     auto addAruco =
         [&](int internalId,
-            const nanofractal::FractalMarkerSet::ArucoInfo& info)
+            const prisma::MarkerSet::ArucoInfo& info)
         {
             const auto ref =
                 model.arucosByInternalId.find(internalId);
@@ -5631,7 +5594,7 @@ void PrismaDetector::PData::addMarkerToPreparedDictionary(
 
             search.cornerAruco[searchId] = info;
             arucoSearchTargets.push_back(
-                nanofractal::ArucoSearchTarget{
+                prisma::ArucoSearchTarget{
                     ref->second.dictId,
                     ref->second.dictionary
                 }
@@ -5659,7 +5622,7 @@ void PrismaDetector::PData::addMarkerToPreparedDictionary(
     for (const auto& item : full.innerAruco)
     {
         addAruco(
-            nanofractal::innerKey(item.first),
+            prisma::innerKey(item.first),
             item.second
         );
     }
@@ -5706,8 +5669,8 @@ void PrismaDetector::PData::resolveStartRules(
 PrismaDetector::PData::PreparedDictionary
 PrismaDetector::PData::prepareDictionary(
     const PDict& dict,
-    nanofractal::FractalMarkerSet& search,
-    std::vector<nanofractal::ArucoSearchTarget>& arucoSearchTargets
+    prisma::MarkerSet& search,
+    std::vector<prisma::ArucoSearchTarget>& arucoSearchTargets
 )
 {
     PreparedDictionary result;
@@ -5715,7 +5678,7 @@ PrismaDetector::PData::prepareDictionary(
 
     std::map<int, cv::aruco2::Dictionary> arucoDictionaryCache;
 
-    search = nanofractal::FractalMarkerSet();
+    search = prisma::MarkerSet();
     search.mInfoType = 2;
     search.idExternal = 0;
 
@@ -5727,7 +5690,7 @@ PrismaDetector::PData::prepareDictionary(
 
     for (const PMark& mark : dict.markers)
     {
-        addMarkerToPreparedDictionary(
+        addMarker(
             result,
             search,
             arucoSearchTargets,
@@ -5771,8 +5734,8 @@ void PrismaDetector::PData::load(
     const PDict source = detail::loadPDict(newType);
 
 
-    nanofractal::FractalMarkerSet search;
-    std::vector<nanofractal::ArucoSearchTarget> arucoSearchTargets;
+    prisma::MarkerSet search;
+    std::vector<prisma::ArucoSearchTarget> arucoSearchTargets;
 
     PreparedDictionary next =
         prepareDictionary(
@@ -5867,10 +5830,10 @@ static void addSeenAruco(
 
 // Check visible ArUco ids and positions.
 static bool arucoOrderOk(
-    const nanofractal::FractalMarkerSet& model,
-    const std::map<int, nanofractal::ArucoRef>& refs,
+    const prisma::MarkerSet& model,
+    const std::map<int, prisma::ArucoRef>& refs,
     const std::vector<SeenAruco>& seen,
-    const std::vector<nanofractal::ArucoHit>& support,
+    const std::vector<prisma::ArucoHit>& support,
     const cv::Mat& homography,
     const cv::Size& imageSize
 )
@@ -5908,14 +5871,14 @@ static bool arucoOrderOk(
         };
 
     const double base =
-        nanofractal::arucoThres(imageSize);
+        prisma::arucoThres(imageSize);
 
     std::vector<Expected> expected;
     expected.reserve(refs.size());
 
     for (const auto& item : refs)
     {
-        const nanofractal::ArucoRef& ref = item.second;
+        const prisma::ArucoRef& ref = item.second;
 
         if (ref.objCorners.size() != 4)
             continue;
@@ -5956,7 +5919,7 @@ static bool arucoOrderOk(
     std::vector<cv::Point2f> outerModel;
     std::vector<cv::Point2f> outerImage;
 
-    if (nanofractal::modelPts(
+    if (prisma::modelPts(
             model,
             model.idExternal,
             outerModel))
@@ -5977,7 +5940,7 @@ static bool arucoOrderOk(
     std::vector<SupportArea> supportAreas;
     supportAreas.reserve(support.size());
 
-    for (const nanofractal::ArucoHit& aruco : support)
+    for (const prisma::ArucoHit& aruco : support)
     {
         if (aruco.imgCorners.size() != 4)
             continue;
@@ -6141,12 +6104,12 @@ static bool arucoOrderOk(
     return true;
 }
 
-static nanofractal::ArucoHit makeArucoHit(
-    const nanofractal::DetectedAruco& detected,
-    const nanofractal::ArucoRef& ref
+static prisma::ArucoHit makeArucoHit(
+    const prisma::DetectedAruco& detected,
+    const prisma::ArucoRef& ref
 )
 {
-    nanofractal::ArucoHit hit;
+    prisma::ArucoHit hit;
     hit.internalId = ref.internalId;
     hit.fullCells = ref.fullCells;
     hit.bits = ref.bits;
@@ -6157,7 +6120,7 @@ static nanofractal::ArucoHit makeArucoHit(
 }
 
 static bool projectOuterCorners(
-    const nanofractal::FractalMarkerSet& model,
+    const prisma::MarkerSet& model,
     const cv::Mat& homography,
     std::vector<cv::Point2f>& corners
 )
@@ -6169,7 +6132,7 @@ static bool projectOuterCorners(
 
     std::vector<cv::Point2f> modelCorners;
 
-    if (!nanofractal::modelPts(
+    if (!prisma::modelPts(
             model,
             model.idExternal,
             modelCorners))
@@ -6297,7 +6260,7 @@ void PrismaDetector::PData::addSeed(
 }
 
 DetectionObservations PrismaDetector::PData::makeObservations(
-    const nanofractal::DetectionEvidence& evidence
+    const prisma::DetectionEvidence& evidence
 ) const
 {
     DetectionObservations result;
@@ -6305,7 +6268,7 @@ DetectionObservations PrismaDetector::PData::makeObservations(
     result.arucos.reserve(evidence.arucos.size());
     result.seenArucos.reserve(evidence.arucos.size());
 
-    for (const nanofractal::LevelHit& detected : evidence.levels)
+    for (const prisma::LevelHit& detected : evidence.levels)
     {
         if (detected.imgCorners.size() != 4 ||
             detected.id < 0 ||
@@ -6324,14 +6287,14 @@ DetectionObservations PrismaDetector::PData::makeObservations(
             continue;
 
         const auto level =
-            model->geometry.fractalMarkerCollection.find(
+            model->geometry.levels.find(
                 owner.levelId
             );
 
-        if (level == model->geometry.fractalMarkerCollection.end())
+        if (level == model->geometry.levels.end())
             continue;
 
-        nanofractal::PrismaMarker fullLevel = level->second;
+        prisma::Marker fullLevel = level->second;
 
         for (int corner = 0; corner < 4; ++corner)
             fullLevel.push_back(detected.imgCorners[corner]);
@@ -6343,7 +6306,7 @@ DetectionObservations PrismaDetector::PData::makeObservations(
         result.levels.push_back(std::move(observation));
     }
 
-    for (const nanofractal::DetectedAruco& detected : evidence.arucos)
+    for (const prisma::DetectedAruco& detected : evidence.arucos)
     {
         if (detected.searchId < 0 ||
             detected.searchId >=
@@ -6400,7 +6363,7 @@ std::vector<InstanceSeed> PrismaDetector::PData::makeSeeds(
 
         std::vector<cv::Point2f> imageCorners;
 
-        if (!nanofractal::levelPts(
+        if (!prisma::levelPts(
                 observation.level,
                 imageCorners))
         {
@@ -6442,7 +6405,7 @@ std::vector<InstanceSeed> PrismaDetector::PData::makeSeeds(
 
     for (const ArucoObservation& observation : observations.arucos)
     {
-        const nanofractal::ArucoHit& hit = observation.aruco;
+        const prisma::ArucoHit& hit = observation.aruco;
 
         if (!observation.canStart ||
             hit.objCorners.size() != 4 ||
@@ -6456,7 +6419,7 @@ std::vector<InstanceSeed> PrismaDetector::PData::makeSeeds(
             result,
             observation.markerId,
             cv::getPerspectiveTransform(
-                nanofractal::toPlane(hit.objCorners),
+                prisma::toPlane(hit.objCorners),
                 hit.imgCorners
             ),
             1
@@ -6503,9 +6466,9 @@ static bool sharesObservedEvidence(
     if (first.id != second.id)
         return false;
 
-    for (const nanofractal::PrismaMarker& a : first.levels)
+    for (const prisma::Marker& a : first.levels)
     {
-        for (const nanofractal::PrismaMarker& b : second.levels)
+        for (const prisma::Marker& b : second.levels)
         {
             if (a.id != b.id)
                 continue;
@@ -6515,9 +6478,9 @@ static bool sharesObservedEvidence(
         }
     }
 
-    for (const nanofractal::ArucoHit& a : first.arucos)
+    for (const prisma::ArucoHit& a : first.arucos)
     {
-        for (const nanofractal::ArucoHit& b : second.arucos)
+        for (const prisma::ArucoHit& b : second.arucos)
         {
             if (a.internalId != b.internalId)
                 continue;
@@ -6556,7 +6519,7 @@ bool PrismaDetector::PData::validateSeed(
         if (observation.markerId != seed.markerId)
             continue;
 
-        if (!nanofractal::levelFits(
+        if (!prisma::levelFits(
                 model.geometry,
                 observation.level,
                 state.homography,
@@ -6573,7 +6536,7 @@ bool PrismaDetector::PData::validateSeed(
         if (observation.markerId != seed.markerId)
             continue;
 
-        if (!nanofractal::arucoFits(
+        if (!prisma::arucoFits(
                 observation.aruco,
                 state.homography,
                 arucoThreshold))
@@ -6591,7 +6554,7 @@ bool PrismaDetector::PData::validateSeed(
     {
         bool hasUniqueAruco = false;
 
-        for (const nanofractal::ArucoHit& aruco : state.arucos)
+        for (const prisma::ArucoHit& aruco : state.arucos)
         {
             if (model.uniqueArucoIds.count(aruco.internalId) != 0)
             {
@@ -6667,10 +6630,10 @@ std::vector<MarkerState> PrismaDetector::PData::validateObservations(
     valid.reserve(seeds.size());
 
     const double levelThreshold =
-        nanofractal::levelThres(imageSize);
+        prisma::levelThres(imageSize);
 
     const double arucoThreshold =
-        nanofractal::arucoThres(imageSize);
+        prisma::arucoThres(imageSize);
 
     for (const InstanceSeed& seed : seeds)
     {
@@ -6750,17 +6713,17 @@ void PrismaDetector::PData::addLevelTargets(
     std::vector<PoseTarget>& targets
 ) const
 {
-    const auto& modelLevels = model.geometry.fractalMarkerCollection;
+    const auto& modelLevels = model.geometry.levels;
     const auto arucoModelRegions =
         pose::modelArucoAreas(model.arucosByInternalId);
     const auto arucoImageRegions =
         pose::imageArucoAreas(state.arucos);
 
-    std::map<int, const nanofractal::PrismaMarker*> detectedById;
+    std::map<int, const prisma::Marker*> detectedById;
     std::vector<int> levelOrder;
     levelOrder.reserve(modelLevels.size());
 
-    for (const nanofractal::PrismaMarker& detected : state.levels)
+    for (const prisma::Marker& detected : state.levels)
     {
         if (modelLevels.find(detected.id) == modelLevels.end())
             continue;
@@ -6780,9 +6743,9 @@ void PrismaDetector::PData::addLevelTargets(
         if (modelItem == modelLevels.end())
             continue;
 
-        const nanofractal::PrismaMarker& modelMarker = modelItem->second;
+        const prisma::Marker& modelMarker = modelItem->second;
         const auto detectedItem = detectedById.find(levelId);
-        const nanofractal::PrismaMarker* detected =
+        const prisma::Marker* detected =
             detectedItem != detectedById.end() ? detectedItem->second : nullptr;
 
         if (detected != nullptr && detected->size() < 4)
@@ -6957,7 +6920,7 @@ void PrismaDetector::PData::addLevelTargets(
             }
 
             const cv::Size subpixWindow =
-                nanofractal::localSubpixWindow(
+                prisma::localSubpixWindow(
                     state.homography,
                     modelPoint,
                     modelCellSize,
@@ -6995,7 +6958,7 @@ void PrismaDetector::PData::addArucoTargets(
     std::vector<PoseTarget>& targets
 ) const
 {
-    for (const nanofractal::ArucoHit& aruco : state.arucos)
+    for (const prisma::ArucoHit& aruco : state.arucos)
     {
         if (aruco.imgCorners.size() != 4 ||
             aruco.objCorners.size() != 4)
@@ -7013,7 +6976,7 @@ void PrismaDetector::PData::addArucoTargets(
 
         const double cellSizePx = pose::cellSize(rawCellSizePx);
 
-        nanofractal::Homographer hom(aruco.imgCorners);
+        prisma::Homographer hom(aruco.imgCorners);
         const int rows = aruco.bits.rows;
         const int cols = aruco.bits.cols;
 
@@ -7030,7 +6993,7 @@ void PrismaDetector::PData::addArucoTargets(
             for (int x = 1; x < cols; ++x)
             {
                 const int cls =
-                    nanofractal::cornerType(
+                    prisma::cornerType(
                         aruco.bits,
                         y,
                         x
@@ -7048,7 +7011,7 @@ void PrismaDetector::PData::addArucoTargets(
                 const cv::Point2f normalized(u, v);
 
                 const cv::Size subpixWindow =
-                    nanofractal::localSubpixWindow(
+                    prisma::localSubpixWindow(
                         hom,
                         normalized,
                         cellStepX,
@@ -7059,7 +7022,7 @@ void PrismaDetector::PData::addArucoTargets(
                     targets,
                     imageSize,
                     stateIndex,
-                    nanofractal::bilinearPoint(
+                    prisma::bilinearPoint(
                         aruco.objCorners,
                         u,
                         v
@@ -7183,7 +7146,7 @@ std::vector<HarrisHit> PrismaDetector::PData::findHarris(
         );
     }
 
-    nanofractal::refineSubpixGrouped(
+    prisma::refineSubpixGrouped(
         gray,
         refinedPoints,
         refineWindows,
@@ -7249,7 +7212,7 @@ void PrismaDetector::PData::addHarrisPoints(
     }
 
     if (!keys.empty())
-        nanofractal::assignClass(gray, keys);
+        prisma::assignClass(gray, keys);
 
     for (int i = 0; i < static_cast<int>(keys.size()); ++i)
     {
@@ -7262,7 +7225,7 @@ void PrismaDetector::PData::addHarrisPoints(
         if (target.state >= valid.size())
             continue;
 
-        nanofractal::addMatch(
+        prisma::addMatch(
             target.obj,
             keypoint.pt,
             valid[target.state].objPoints,
@@ -7285,9 +7248,9 @@ void PrismaDetector::PData::addDirectPoints(
         // Direct ArUco corners. Below the minimum cell size their errors are
         // correlated across the four corners and bias the rotation, so they
         // are kept aside and only used when nothing else is available.
-        std::vector<const nanofractal::ArucoHit*> smallArucos;
+        std::vector<const prisma::ArucoHit*> smallArucos;
 
-        for (const nanofractal::ArucoHit& aruco : state.arucos)
+        for (const prisma::ArucoHit& aruco : state.arucos)
         {
             if (aruco.imgCorners.size() != 4 || aruco.objCorners.size() != 4)
                 continue;
@@ -7298,7 +7261,7 @@ void PrismaDetector::PData::addDirectPoints(
                 continue;
             }
 
-            nanofractal::addAruco4(
+            prisma::addAruco4(
                 aruco,
                 state.objPoints,
                 state.imgPoints
@@ -7307,11 +7270,11 @@ void PrismaDetector::PData::addDirectPoints(
 
         if (!state.homography.empty())
         {
-            for (const nanofractal::PrismaMarker& detected : state.levels)
+            for (const prisma::Marker& detected : state.levels)
             {
-                const auto item = model->geometry.fractalMarkerCollection.find(
+                const auto item = model->geometry.levels.find(
                     detected.id);
-                if (item == model->geometry.fractalMarkerCollection.end())
+                if (item == model->geometry.levels.end())
                     continue;
 
                 const auto& modelKeypoints = item->second.getKeyptsRef();
@@ -7326,7 +7289,7 @@ void PrismaDetector::PData::addDirectPoints(
                 for (int corner = 0; corner < 4; ++corner)
                 {
                     const cv::Point2f& modelPoint = modelKeypoints[corner].pt;
-                    nanofractal::addMatch(
+                    prisma::addMatch(
                         cv::Point3f(modelPoint.x, modelPoint.y, 0.f),
                         detected[corner],
                         state.objPoints,
@@ -7339,9 +7302,9 @@ void PrismaDetector::PData::addDirectPoints(
 
         if (state.objPoints.size() < 4)
         {
-            for (const nanofractal::ArucoHit* aruco : smallArucos)
+            for (const prisma::ArucoHit* aruco : smallArucos)
             {
-                nanofractal::addAruco4(
+                prisma::addAruco4(
                     *aruco,
                     state.objPoints,
                     state.imgPoints
@@ -7349,7 +7312,7 @@ void PrismaDetector::PData::addDirectPoints(
             }
         }
 
-        nanofractal::removeDup(
+        prisma::removeDup(
             state.objPoints,
             state.imgPoints,
             4.f
@@ -7370,7 +7333,7 @@ bool PrismaDetector::PData::buildResult(
 
     std::map<int, std::vector<cv::Point2f>> detectedLevels;
 
-    for (const nanofractal::PrismaMarker& level : state.levels)
+    for (const prisma::Marker& level : state.levels)
     {
         if (level.size() < 4)
             continue;
@@ -7386,9 +7349,9 @@ bool PrismaDetector::PData::buildResult(
     // Depth of each level: 1 is the external (largest) level and N the
     // innermost one; the central ArUco is reported as 0.
     std::vector<std::pair<float, int>> levelsBySize;
-    levelsBySize.reserve(model.geometry.fractalMarkerCollection.size());
+    levelsBySize.reserve(model.geometry.levels.size());
 
-    for (const auto& item : model.geometry.fractalMarkerCollection)
+    for (const auto& item : model.geometry.levels)
         levelsBySize.emplace_back(item.second.getMarkerSize(), item.first);
 
     std::sort(
@@ -7401,7 +7364,7 @@ bool PrismaDetector::PData::buildResult(
     for (std::size_t i = 0; i < levelsBySize.size(); ++i)
         levelDepth[levelsBySize[i].second] = static_cast<int>(i) + 1;
 
-    for (const auto& item : model.geometry.fractalMarkerCollection)
+    for (const auto& item : model.geometry.levels)
     {
         const auto level = detectedLevels.find(item.first);
 
@@ -7498,7 +7461,7 @@ bool PrismaDetector::PData::buildResult(
     }
 
     // The central ArUco is reported as level 0 when it was validated.
-    for (const nanofractal::ArucoHit& aruco : state.arucos)
+    for (const prisma::ArucoHit& aruco : state.arucos)
     {
         if (aruco.internalId >= 0 || aruco.imgCorners.size() != 4)
             continue;
@@ -7513,7 +7476,7 @@ bool PrismaDetector::PData::buildResult(
     // central one (depth 0).
     std::set<int> arucoLevels;
 
-    for (const nanofractal::ArucoHit& aruco : state.arucos)
+    for (const prisma::ArucoHit& aruco : state.arucos)
         arucoLevels.insert(aruco.internalId < 0 ? 0 : aruco.internalId / 4 + 1);
 
     marker.arucoLevels.assign(arucoLevels.begin(), arucoLevels.end());
@@ -7532,8 +7495,8 @@ bool PrismaDetector::PData::buildResult(
     if (state.levels.empty() || marker.corners.size() != 4)
         return false;
 
-    const nanofractal::PrismaMarker& outer =
-        model.geometry.fractalMarkerCollection.at(
+    const prisma::Marker& outer =
+        model.geometry.levels.at(
             model.geometry.idExternal
         );
 
@@ -7551,10 +7514,8 @@ bool PrismaDetector::PData::buildResult(
     return true;
 }
 
-std::vector<PrismaMarker> PrismaDetector::PData::buildResults(
-    const std::vector<MarkerState>& valid,
-    const DetectionObservations& observations,
-    bool pose
+std::vector<PrismaMarker> PrismaDetector::PData::buildResults( const std::vector<MarkerState>& valid, const DetectionObservations& observations,
+bool pose
 ) const
 {
     std::vector<PrismaMarker> result;
@@ -7609,20 +7570,17 @@ std::vector<PrismaMarker> PrismaDetector::PData::buildResults(
     return result;
 }
 
-std::vector<PrismaMarker> PrismaDetector::PData::detectFrame(
-    const cv::Mat& image,
-    bool pose
-)
+std::vector<PrismaMarker> PrismaDetector::PData::detectFrame(const cv::Mat& image, bool pose)
 {
     // Extract reusable square candidates from the frame.
-    nanofractal::PrismaDetectionContext context =
+    prisma::DetectionContext context =
         detector.extractCandidates(image);
 
     if (context.gray.empty() || context.squares.empty())
         return {};
 
     // Recognize low-level pieces.
-    const nanofractal::DetectionEvidence evidence =
+    const prisma::DetectionEvidence evidence =
         detector.detect(context);
 
 
@@ -7659,10 +7617,7 @@ std::vector<PrismaMarker> PrismaDetector::PData::detectFrame(
     );
 }
 
-std::vector<PrismaMarker> PrismaDetector::detect(
-    InputArray _image,
-    bool pose
-)
+std::vector<PrismaMarker> PrismaDetector::detect(InputArray _image, bool pose)
 {
     const cv::Mat image = _image.getMat();
 
@@ -7673,11 +7628,7 @@ std::vector<PrismaMarker> PrismaDetector::detect(
     return data->detectFrame(image, pose);
 }
 
-std::vector<PrismaMarker> detectPrisma(
-    InputArray image,
-    PrismaDict dictionary,
-    bool pose
-)
+std::vector<PrismaMarker> detectPrisma(InputArray image, PrismaDict dictionary, bool pose)
 {
     static thread_local cv::Ptr<PrismaDetector> detector;
     static thread_local PrismaDict current =
@@ -7702,7 +7653,7 @@ std::vector<PrismaMarker> detectPrisma(
 }
 
 
-void drawPrisma(InputOutputArray _image, const std::vector<PrismaMarker> &fractals,
+void drawPrisma(InputOutputArray _image, const std::vector<PrismaMarker> &markers,
                           Scalar color, bool drawAllImagePoints) {
     cv::Mat image = _image.getMat();
 
@@ -7710,7 +7661,7 @@ void drawPrisma(InputOutputArray _image, const std::vector<PrismaMarker> &fracta
     int lineWidth = int(std::round(lineWidthF));
     int dotRadius = std::max(2, int(std::round(lineWidthF * 1.2f)));
 
-    for (const auto &m : fractals) {
+    for (const auto &m : markers) {
         const bool hasCorners = m.corners.size() >= 4;
 
         if (m.type == PRISMA_CUSTOM && !m.levelCorners.empty()) {
@@ -7738,11 +7689,11 @@ void drawPrisma(InputOutputArray _image, const std::vector<PrismaMarker> &fracta
     }
 }
 
-void getSolvePnpPoints(const PrismaMarker &fractal, OutputArray objPoints,
+void getSolvePnpPoints(const PrismaMarker &marker, OutputArray objPoints,
                        OutputArray imgPoints, float markerSize) {
     // Scale normalized 3D points.
     float scale = markerSize / 2.0f;
-    int n = int(fractal.imgPoints.size());
+    int n = int(marker.imgPoints.size());
 
     if (n == 0) {
         imgPoints.assign(cv::Mat());
@@ -7753,10 +7704,10 @@ void getSolvePnpPoints(const PrismaMarker &fractal, OutputArray objPoints,
     cv::Mat imgMat(n, 1, CV_32FC2);
     cv::Mat objMat(n, 1, CV_32FC3);
     for (int i = 0; i < n; i++) {
-        imgMat.at<cv::Vec2f>(i) = {fractal.imgPoints[i].x, fractal.imgPoints[i].y};
-        objMat.at<cv::Vec3f>(i) = {fractal.objPoints[i].x * scale,
-                                   fractal.objPoints[i].y * scale,
-                                   fractal.objPoints[i].z * scale};
+        imgMat.at<cv::Vec2f>(i) = {marker.imgPoints[i].x, marker.imgPoints[i].y};
+        objMat.at<cv::Vec3f>(i) = {marker.objPoints[i].x * scale,
+                                   marker.objPoints[i].y * scale,
+                                   marker.objPoints[i].z * scale};
     }
     imgPoints.assign(imgMat);
     objPoints.assign(objMat);
