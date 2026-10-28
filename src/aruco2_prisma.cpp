@@ -268,6 +268,7 @@ Marker::Marker(int _id, cv::Mat m, std::vector<cv::Point3f> corners, std::vector
     _mask = cv::Mat::ones(m.size(), CV_8UC1);
 }
 
+// Extract internal corners from the marker bit pattern
 std::vector<cv::KeyPoint> Marker::getKeypts()
 {
     if(keypts.size() > 4) return keypts;
@@ -304,7 +305,7 @@ std::vector<cv::KeyPoint> Marker::getKeypts()
 
     return keypts;
 }
-
+// Mask the area occupied by an inner level
 void Marker::addInner(Marker submarker)
 {
     int nBitsSqrt= sqrt(nBits());
@@ -382,7 +383,7 @@ struct ArucoBlock
     double x2 = 0.0;
     double y2 = 0.0;
 };
-
+// Position auxiliary ArUcos according to the level layout
 static cv::Point2i arucoCell(
     cv::aruco2::PrismaLayout layout,
     int sideBits,
@@ -1091,7 +1092,7 @@ static void applyArucoMask(
         );
     }
 }
-
+// Build the reference pattern, masking nested levels and ArUcos
 static void makeRef(
     const Marker& fm,
     const MarkerSet& markerSet,
@@ -1170,7 +1171,7 @@ static int innerKey(int markerId)
     // Internal lookup key.
     return -(markerId + 1);
 }
-
+// Prepare auxiliary ArUco patterns and their model coordinates
 static std::vector<ArucoRef> makeArucoRefs(
     const MarkerSet& markerSet,
     std::map<int, cv::aruco2::Dictionary>& dictionaryCache
@@ -1612,7 +1613,7 @@ static cv::Size localSubpixWindow(
         bottom - top
     );
 }
-
+// Refine corners in groups with the same subpixel window
 static void refineSubpixGrouped(
     const cv::Mat& gray,
     std::vector<cv::Point2f>& points,
@@ -2230,7 +2231,7 @@ static std::uint64_t packMaskedBits64(
     return key;
 }
 
-// PRISMarker detector.
+// Detect level patterns and auxiliary ArUcos from shared candidates
 class Detector
 {
 public:
@@ -2329,7 +2330,7 @@ private:
         cv::aruco2::FiducialMarker& detected
     );
 };
-
+// Prepare level references and cache auxiliary ArUco dictionaries
 void Detector::setParams(
     const MarkerSet& model,
     const std::vector<ArucoSearchTarget>& arucoTargets
@@ -2421,7 +2422,7 @@ void Detector::setParams(
 
     rebuildHash();
 }
-
+// Build lookup tables using discriminative bits from each level
 void Detector::rebuildHash()
 {
     hashBySize.clear();
@@ -2950,10 +2951,8 @@ bool Detector::identifyArucoCandidate(
     detected = std::move(marker);
     return true;
 }
-
-DetectionContext Detector::extractCandidates(
-    const cv::Mat& img
-) const
+// Extract quadrilaterals shared by level and ArUco detection
+DetectionContext Detector::extractCandidates(const cv::Mat& img) const
 {
     DetectionContext context;
     if (img.empty())
@@ -3136,7 +3135,7 @@ cv::Mat Detector::getBits(
 
     return bits;
 }
-
+// Identify level patterns and auxiliary ArUcos in the candidates
 DetectionEvidence Detector::detect(
     DetectionContext& context
 )
@@ -4437,7 +4436,7 @@ static void putAruco(
     cv::resize(fiducial, resized, roi.size(), 0.0, 0.0, cv::INTER_NEAREST);
     resized.copyTo(image(roi));
 }
-
+// Render one level with its auxiliary ArUcos.
 static cv::Mat drawFLevel(
     const PMark& marker,
     int levelIndex,
@@ -4541,7 +4540,7 @@ static cv::Mat drawFLevel(
 
     return image;
 }
-
+// Combine all levels into the final printable marker
 static cv::Mat drawPRISMarker(
     const PMark& marker,
     DictionaryType dictionary,
@@ -4633,6 +4632,7 @@ static bool estimateCorners(
 
 } // anonymous namespace
 
+// Generate one marker or all markers from a dictionary
 static std::vector<cv::Mat> printFData(
     const PDict& dict,
     int markerId,
@@ -5195,6 +5195,7 @@ struct InstanceSeed
     int strength = 0;
 };
 
+// Associate detected levels and ArUcos into complete PRISMarkers
 struct PrismaDetector::PData
 {
     // Search-level id -> complete PRISMarker / local level.
@@ -5385,7 +5386,7 @@ private:
         PrismaMarker& marker
     ) const;
 };
-
+// Build the normalized geometry of a predefined marker
 prisma::MarkerSet PrismaDetector::PData::buildModel(
     const PMark& mark,
     DictionaryType arucoDict
@@ -5631,7 +5632,7 @@ void PrismaDetector::PData::addMarker(
     model.geometry = std::move(full);
     out.modelsByMarkerId[mark.id] = std::move(model);
 }
-
+// Allow an ArUco to start a hypothesis only if its id is unique
 void PrismaDetector::PData::resolveStartRules(
     PreparedDictionary& out,
     const ArucoOwners& markersByAruco
@@ -5665,7 +5666,7 @@ void PrismaDetector::PData::resolveStartRules(
             owners->second.size() == 1;
     }
 }
-
+// Prepare marker models and their shared search data
 PrismaDetector::PData::PreparedDictionary
 PrismaDetector::PData::prepareDictionary(
     const PDict& dict,
@@ -6258,7 +6259,7 @@ void PrismaDetector::PData::addSeed(
     seed.strength = strength;
     seeds.push_back(std::move(seed));
 }
-
+// Map low-level detections to their marker and level
 DetectionObservations PrismaDetector::PData::makeObservations(
     const prisma::DetectionEvidence& evidence
 ) const
@@ -6345,7 +6346,7 @@ DetectionObservations PrismaDetector::PData::makeObservations(
 
     return result;
 }
-
+// Initialize homographies from detected levels and ArUcos
 std::vector<InstanceSeed> PrismaDetector::PData::makeSeeds(
     const DetectionObservations& observations
 ) const
@@ -6496,7 +6497,7 @@ static bool sharesObservedEvidence(
 
     return false;
 }
-
+// Check detected levels and ArUcos against the candidate homography
 bool PrismaDetector::PData::validateSeed(
     const InstanceSeed& seed,
     const DetectionObservations& observations,
@@ -6580,7 +6581,7 @@ bool PrismaDetector::PData::validateSeed(
 
     return true;
 }
-
+// Keep the strongest evidence for each detected instance
 void PrismaDetector::PData::insertBestState(
     std::vector<MarkerState>& valid,
     MarkerState&& state
@@ -6662,7 +6663,7 @@ std::vector<MarkerState> PrismaDetector::PData::validateObservations(
 
     return valid;
 }
-
+// Collect refined and direct correspondences for pose estimation
 void PrismaDetector::PData::addPosePoints(
     std::vector<MarkerState>& valid,
     const cv::Mat& gray
@@ -7036,7 +7037,7 @@ void PrismaDetector::PData::addArucoTargets(
         }
     }
 }
-
+// Search Harris corners near the projected model points
 std::vector<HarrisHit> PrismaDetector::PData::findHarris(
     const std::vector<PoseTarget>& targets,
     const cv::Mat& gray
@@ -7320,6 +7321,7 @@ void PrismaDetector::PData::addDirectPoints(
     }
 }
 
+// Convert a validated instance into a public PRISMarker result
 bool PrismaDetector::PData::buildResult(
     const MarkerState& state,
     const MarkerModel& model,
