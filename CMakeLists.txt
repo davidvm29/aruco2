@@ -77,6 +77,8 @@ target_link_libraries(aruco2_detect_diamonds PRIVATE ${OpenCV_LIBS})
 add_executable(aruco2_detect_raruco utils/aruco2_detect_raruco.cpp ${SRCARUCO2})
 target_link_libraries(aruco2_detect_raruco PRIVATE ${OpenCV_LIBS})
 
+add_executable(aruco2_webcam_pose_prisma utils/aruco2_webcam_pose_prisma.cpp ${SRCARUCO2})
+target_link_libraries(aruco2_webcam_pose_prisma PRIVATE ${OpenCV_LIBS})
 
 # ---------------------------------------------------------------------------
 # 8. Status Printout
@@ -86,3 +88,6 @@ message(STATUS "OpenCV version: ${OpenCV_VERSION}")
 message(STATUS "Build type:     ${CMAKE_BUILD_TYPE}")
 message(STATUS "Compiler ID:    ${CMAKE_CXX_COMPILER_ID}")
 message(STATUS "---------------------------------------------------")
+
+add_executable(aruco2_detect_prisma utils/aruco2_detect_prisma.cpp ${SRCARUCO2})
+target_link_libraries(aruco2_detect_prisma PRIVATE ${OpenCV_LIBS})
