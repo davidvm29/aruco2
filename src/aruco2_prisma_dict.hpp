@@ -50,9 +50,16 @@ struct PDict
     std::vector<PMark> markers;
 };
 
-// Load a predefined PRISMarker dictionary.
-PDict loadPDict(PrismaDict type);
-PDict loadPDict(const cv::String& name);
+// Load a predefined PRISMarker dictionary with the selected auxiliary dictionary.
+PDict loadPDict(
+    PrismaDict type,
+    DictionaryType auxiliaryDictionary
+);
+
+PDict loadPDict(
+    const cv::String& name,
+    DictionaryType auxiliaryDictionary
+);
 
 } // namespace detail
 } // namespace aruco2

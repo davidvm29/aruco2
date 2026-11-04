@@ -77,8 +77,6 @@ target_link_libraries(aruco2_detect_diamonds PRIVATE ${OpenCV_LIBS})
 add_executable(aruco2_detect_raruco utils/aruco2_detect_raruco.cpp ${SRCARUCO2})
 target_link_libraries(aruco2_detect_raruco PRIVATE ${OpenCV_LIBS})
 
-add_executable(aruco2_webcam_pose_prisma utils/aruco2_webcam_pose_prisma.cpp ${SRCARUCO2})
-target_link_libraries(aruco2_webcam_pose_prisma PRIVATE ${OpenCV_LIBS})
 
 # ---------------------------------------------------------------------------
 # 8. Status Printout

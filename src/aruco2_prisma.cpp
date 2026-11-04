@@ -4416,7 +4416,7 @@ static void putAruco(
         prismarkerFail(
             "The auxiliary dictionary does not contain ArUco id " +
                 std::to_string(id),
-            "printPrisma"
+            "getPrismaMarkerImage"
         );
     }
 
@@ -4430,7 +4430,7 @@ static void putAruco(
     );
 
     if (fiducial.empty())
-        prismarkerFail("Could not generate auxiliary ArUco", "printPrisma");
+        prismarkerFail("Could not generate auxiliary ArUco", "getPrismaMarkerImage");
 
     cv::Mat resized;
     cv::resize(fiducial, resized, roi.size(), 0.0, 0.0, cv::INTER_NEAREST);
@@ -4632,8 +4632,8 @@ static bool estimateCorners(
 
 } // anonymous namespace
 
-// Generate one marker or all markers from a dictionary
-static std::vector<cv::Mat> printFData(
+// Render one PRISMarker; batch printing is handled by the CLI via getPrismaCount().
+static cv::Mat renderPrismaImage(
     const PDict& dict,
     int markerId,
     int bitSize
@@ -4643,7 +4643,7 @@ static std::vector<cv::Mat> printFData(
     {
         prismarkerFail(
             "bitSize must be a positive integer or -1 for automatic sizing",
-            "printPrisma"
+            "getPrismaMarkerImage"
         );
     }
 
@@ -4653,7 +4653,7 @@ static std::vector<cv::Mat> printFData(
             "bitSize must be a multiple of " +
                 std::to_string(kPrismaBitSizeStep) +
                 " so that the auxiliary and central ArUcos are drawn exactly",
-            "printPrisma"
+            "getPrismaMarkerImage"
         );
     }
 
@@ -4662,49 +4662,31 @@ static std::vector<cv::Mat> printFData(
             ? kPrismaInnerCellSize
             : bitSize;
 
-    std::vector<cv::Mat> images;
-
-    if (markerId >= 0)
-    {
-        images.push_back(
-            drawPRISMarker(
-                getPrismaMarker(dict, markerId),
-                dict.arucoDict,
-                lastLevelBitSize
-            )
-        );
-
-        return images;
-    }
-
-    images.reserve(dict.markers.size());
-
-    for (const PMark& marker : dict.markers)
-    {
-        images.push_back(
-            drawPRISMarker(
-                marker,
-                dict.arucoDict,
-                lastLevelBitSize
-            )
-        );
-    }
-
-    return images;
+    return drawPRISMarker(
+        getPrismaMarker(dict, markerId),
+        dict.arucoDict,
+        lastLevelBitSize
+    );
 }
 
 
-std::vector<cv::Mat> printPrisma(
+void getPrismaMarkerImage(
+    OutputArray image,
     PrismaDict dictionary,
     int markerId,
-    int bitSize
+    int bitSize,
+    DictionaryType auxiliaryDictionary
 )
 {
-    return printFData(
-        detail::loadPDict(dictionary),
+    if (markerId < 0)
+        CV_Error(cv::Error::StsBadArg, "PRISMarker id must be non-negative");
+
+    const cv::Mat markerImage = renderPrismaImage(
+        detail::loadPDict(dictionary, auxiliaryDictionary),
         markerId,
         bitSize
     );
+    markerImage.copyTo(image);
 }
 
 struct MarkerState
@@ -5237,6 +5219,8 @@ struct PrismaDetector::PData
 
     PrismaDict type =
         static_cast<PrismaDict>(-1);
+    DictionaryType auxiliaryDictionary =
+        static_cast<DictionaryType>(-1);
 
     // Low-level detector, reused between frames.
     prisma::Detector detector;
@@ -5250,7 +5234,7 @@ struct PrismaDetector::PData
             static_cast<PrismaDict>(-1);
     }
 
-    void load(PrismaDict newType);
+    void load(PrismaDict newType, DictionaryType newAuxiliaryDictionary);
 
     // Per-frame detection pipeline.
     std::vector<PrismaMarker> detectFrame(
@@ -5722,17 +5706,18 @@ PrismaDetector::PData::findModel(int markerId) const
 }
 
 void PrismaDetector::PData::load(
-    PrismaDict newType
+    PrismaDict newType,
+    DictionaryType newAuxiliaryDictionary
 )
 {
 
-    if (type == newType)
+    if (type == newType && auxiliaryDictionary == newAuxiliaryDictionary)
     {
         return;
     }
 
 
-    const PDict source = detail::loadPDict(newType);
+    const PDict source = detail::loadPDict(newType, newAuxiliaryDictionary);
 
 
     prisma::MarkerSet search;
@@ -5753,28 +5738,31 @@ void PrismaDetector::PData::load(
 
     prepared = std::move(next);
     type = newType;
+    auxiliaryDictionary = newAuxiliaryDictionary;
 
 }
 
 PrismaDetector::PrismaDetector(
-    PrismaDict dictionary
+    PrismaDict dictionary,
+    DictionaryType auxiliaryDictionary
 )
     : data(cv::makePtr<PData>())
 {
-    data->load(dictionary);
+    data->load(dictionary, auxiliaryDictionary);
 }
 
 
 PrismaDetector::~PrismaDetector() = default;
 
 void PrismaDetector::setDictionary(
-    PrismaDict dictionary
+    PrismaDict dictionary,
+    DictionaryType auxiliaryDictionary
 )
 {
     if (!data)
         data = cv::makePtr<PData>();
 
-    data->load(dictionary);
+    data->load(dictionary, auxiliaryDictionary);
 }
 
 
@@ -7630,32 +7618,37 @@ std::vector<PrismaMarker> PrismaDetector::detect(InputArray _image, bool pose)
     return data->detectFrame(image, pose);
 }
 
-std::vector<PrismaMarker> detectPrisma(InputArray image, PrismaDict dictionary, bool pose)
+std::vector<PrismaMarker> detectPrismaMarkers(InputArray image, PrismaDict dictionary,
+                                       bool pose, DictionaryType auxiliaryDictionary)
 {
     static thread_local cv::Ptr<PrismaDetector> detector;
     static thread_local PrismaDict current =
         static_cast<PrismaDict>(-1);
+    static thread_local DictionaryType currentAuxiliary =
+        static_cast<DictionaryType>(-1);
 
     if (!detector)
     {
         detector =
             cv::makePtr<PrismaDetector>(
-                dictionary
+                dictionary, auxiliaryDictionary
             );
 
         current = dictionary;
+        currentAuxiliary = auxiliaryDictionary;
     }
-    else if (current != dictionary)
+    else if (current != dictionary || currentAuxiliary != auxiliaryDictionary)
     {
-        detector->setDictionary(dictionary);
+        detector->setDictionary(dictionary, auxiliaryDictionary);
         current = dictionary;
+        currentAuxiliary = auxiliaryDictionary;
     }
 
     return detector->detect(image, pose);
 }
 
 
-void drawPrisma(InputOutputArray _image, const std::vector<PrismaMarker> &markers,
+void drawPrismaMarkers(InputOutputArray _image, const std::vector<PrismaMarker> &markers,
                           Scalar color, bool drawAllImagePoints) {
     cv::Mat image = _image.getMat();
 

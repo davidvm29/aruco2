@@ -1,6 +1,6 @@
 # aruco2 — A Simpler ArUco for OpenCV 
 
-<img src="types.jpg" width="60%"/>
+<img src="./types.png" width="28%" alt="Example PRISMarker with four nested levels"/>
 
 A proposed replacement for the ArUco module in OpenCV (fully compatible and compiling with both OpenCV 5 and OpenCV 4), by the original ArUco author. This repository serves as the standalone version of the implementation proposed in [OpenCV PR #29063](https://github.com/opencv/opencv/pull/29063) before it is accepted (if it ever is) in the official OpenCV.
 
@@ -8,7 +8,7 @@ A proposed replacement for the ArUco module in OpenCV (fully compatible and comp
 - **Single public header** — `#include "aruco2.hpp"` is all you need; no extra headers to hunt down
 - **6.5× more efficient** detection engine based on [ArUco Nano](https://www.sciencedirect.com/science/article/pii/S2352711026001822)
 - **[OpenCL acceleration](#opencl--gpu-acceleration)**  ([SSRN 7031769](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=7031769)) 
-- **Fractal markers** — [nested multi-scale design](https://ieeexplore.ieee.org/document/8890613/) gives many more corners for pose estimation, robust to heavy occlusion 
+- **PRISMarker** — [recursive multi-scale fiducial markers](#prismarker-generation-and-detection) with reusable dictionaries, unique level layouts, auxiliary ArUco/AprilTag markers, and geometry-guided pose refinement
 - **Boards and diamonds** based on [ChArUco2](https://www.sciencedirect.com/science/article/pii/S2352711026003249) — double the marker density, twice the corners at 75% occlusion
 - **RArUco markers** ([RArUco paper](https://www.mdpi.com/2224-2708/15/5/70)) — recursive design nesting the same marker ID within its own bit cells; maintains a single ID across all scales for robust, long-range UAV landing pads (independent of center visibility)
 - **Up to 2.7× faster** dictionary identification via O(1) hash-map lookup
@@ -56,7 +56,7 @@ for (auto &marker : cv::aruco2::detectFiducialMarkers(image))
 | Default error correction | 0.6 (may cause false positives) | 0 (strict — raise only when needed) |
 | Board design | markers on half the squares | ChArUco2: markers on every square |
 | Diamond | separate concept using corner lists | first-class `Diamond` type with `vector<FiducialMarker>` |
-| Fractal markers | not supported | first-class `FractalMarker` type — nested design, many more pose corners |
+| PRISMarker | not supported | A new fractal-style marker offering improved robustness to occlusions and a wider detection range thanks to its auxiliary markers |
 | RArUco markers | not supported | recursive marker generation and detection via `detectRArucoMarkers()` |
 | Python result | separate lists | `markers = cv.aruco2.detectFiducialMarkers(image)` |
 
@@ -83,10 +83,10 @@ struct Diamond {
     std::vector<FiducialMarker> markers;    // the 4 detected markers forming the diamond
 };
 
-struct FractalMarker {
-    std::vector<cv::Point2f> corners; // 4 outer corners, clockwise from top-left
-    FractalType type;                 // fractal configuration (FRACTAL_2L_6 … FRACTAL_5L_6)
-    int id = -1;                      // id of the outer marker
+struct PrismaMarker {
+    std::vector<cv::Point2f> corners; // outer marker corners
+    int id = -1;
+    PrismaType type;
 };
 ```
 
@@ -99,25 +99,25 @@ struct FractalMarker {
 | `getFiducialMarkerImage(img, dictionary, id)` | render a single marker to an image |
 | `getGridBoardImage(img, boardSize, dictionary)` | render a grid board to an image |
 | `getDiamondImage(img, dictionary, ids)` | render a diamond (2×2 block) to an image |
-| `getFractalMarkerImage(img, ftype)` | render a fractal marker to an image |
+| `getPrismaMarkerImage(img, PRISMA_Dx, id, bitSize, auxiliaryDictionary)` | render a single PRISMarker to an image |  |
 | `getRArucoMarkerImage(img, dictionary, id, depth, bitSize, innerBorders, externalBorder)` | render a RArUco marker to an image |
 | `detectFiducialMarkers(image, dictionary)` → `vector<FiducialMarker>` | find markers in an image |
 | `detectFiducialMarkers(image, {dictionary, …})` → `vector<FiducialMarker>` | find markers across multiple dictionaries |
 | `detectGridBoard(image, gridSize, dictionary, board)` → `bool` | find a grid board |
 | `detectDiamonds(image, dictionary)` → `vector<Diamond>` | find diamond markers |
-| `detectFractals(image, ftype)` → `vector<FractalMarker>` | find fractal markers |
+|`detectPrismaMarkers(image, PRISMA_Dx, pose, auxiliaryDictionary)` → `vector<PrismaMarker>` | find PRISMarkers in an image | |
 | `detectRArucoMarkers(image, dictionary, params)` → `vector<FiducialMarker>` | find RArUco markers (ignores center details using border-sampling) |
 | `drawFiducialMarkers(image, markers)` | draw marker outlines and ids |
 | `drawGridBoard(image, board)` | draw detected board corners |
 | `drawDiamonds(image, diamonds)` | draw diamond outlines and ids |
-| `drawFractals(image, fractals)` | draw fractal marker outlines, ids, and all matched image points (circles) |
+| `drawPrismaMarkers(image, markers)` | draw PRISMarker outlines and IDs |
 | `drawAxis(image, cameraMatrix, distCoeffs, rvec, tvec, length)` | draw XYZ coordinate axes from a solvePnP result (X red, Y green, Z blue) |
 | `getSolvePnpPoints(marker, objPts, imgPts)` | extract solvePnP inputs for a fiducial marker |
 | `getSolvePnpPoints(board, objPts, imgPts)` | extract solvePnP inputs for a grid board |
 | `getSolvePnpPoints(diamond, objPts, imgPts)` | extract solvePnP inputs for a diamond |
-| `getSolvePnpPoints(fractal, objPts, imgPts)` | extract solvePnP inputs for a fractal marker |
+| `getSolvePnpPoints(prismaMarker, objPts, imgPts, markerSize)` | extract solvePnP inputs for a PRISMarker |
 
-Generate → Detect → Draw → Pose: four verbs, four target types, one consistent pattern.
+Generate → Detect → Draw → Pose: four verbs, five marker types, one consistent pattern.
 
 ---
 
@@ -230,8 +230,8 @@ cv::aruco2::drawAxis(image, cameraMatrix, distCoeffs, rvec, tvec,
                      0.025f); // axis length in the same unit as tvec (here 2.5 cm)
 ```
 
-The function works identically for markers, boards, diamonds and fractal markers — pass the
-`rvec` / `tvec` pair from any `solvePnP` call.
+The function works for fiducial markers, boards, diamonds and PRISMarkers — pass the
+`rvec` / `tvec` pair from the corresponding `solvePnP` call.
 
 Coordinate conventions (all target types share the same handedness):
 
@@ -240,7 +240,7 @@ Coordinate conventions (all target types share the same handedness):
 | FiducialMarker | marker centre | → right | ↑ up | out of plane toward camera |
 | GridBoard | top-left corner | → right | ↑ up | out of plane toward camera |
 | Diamond | diamond centre | → right | ↑ up | out of plane toward camera |
-| Fractal | marker centre | → right | ↑ up | out of plane toward camera |
+| PRISMarker | outer marker centre | → right | ↑ up | out of plane toward camera |
 
 ---
 
@@ -321,48 +321,115 @@ auto markers = cv::aruco2::detectFiducialMarkers(image, cv::aruco2::DICT_6X6_250
 
 ---
 
-### Fractal marker generation and detection
+### PRISMarker generation and detection
 
-A fractal marker is a nested design: the outer 6×6 marker contains one or more smaller
-markers at decreasing scales.  More levels mean more visible corners, giving better pose
-accuracy and robustness to partial occlusion.
+PRISMarker is a recursive marker designed for detection and pose estimation at different distances. It consists of a central marker surrounded by nested levels, each containing a 10×10 binary layout and four auxiliary markers placed at the corners (C) or sides (K). These layouts alternate between levels.
+
+Each layout and auxiliary marker is unique within its dictionary, allowing a PRISMarker to be identified even when only part of it is visible.
+
+Four depths are available (`PRISMA_D1` to `PRISMA_D4`), supporting 24 auxiliary dictionaries from ArUco, AprilTag and ALVAR. The default is `DICT_ARUCO_MIP_36h12`. The implementation includes 200 CORNERS and 200 CARDINAL layouts, with a minimum rotational Hamming distance of 16.
+
+| Dictionary  | Layouts (outer → inner) | Auxiliary IDs | Max. markers | MIP 36h12 | AprilTag 36h11 | AprilTag 36h10 |
+| :---------- | :---------------------- | ------------: | -----------: | --------: | -------------: | -------------: |
+| `PRISMA_D1` | C or K                  |             5 |          400 |        50 |            117 |            400 |
+| `PRISMA_D2` | KC                      |             9 |          200 |        27 |             65 |            200 |
+| `PRISMA_D3` | CKC or KCK              |            13 |          133 |        19 |             45 |            133 |
+| `PRISMA_D4` | KCKC                    |            17 |          100 |        14 |             34 |            100 |
+
+
+#### Generate a PRISMarker image
 
 ```cpp
-// Generate a FRACTAL_3L_6 image (3 nesting levels)
-cv::Mat fractalImg;
-cv::aruco2::getFractalMarkerImage(fractalImg, cv::aruco2::FRACTAL_3L_6);
-cv::imwrite("fractal.png", fractalImg);
+#include "opencv2/objdetect/aruco2.hpp"
+#include <opencv2/imgcodecs.hpp>
 
-// Detect fractal markers
-auto fractals = cv::aruco2::detectFractals(image, cv::aruco2::FRACTAL_3L_6);
+const auto aux = cv::aruco2::DICT_ARUCO_MIP_36h12;
+const int count = cv::aruco2::getPrismaCount(cv::aruco2::PRISMA_D2, aux); // 27
 
-// Draw results — outline, id, and all matched image points (default)
-cv::aruco2::drawFractals(image, fractals);
-
-// Outline and id only, no image points
-// cv::aruco2::drawFractals(image, fractals, cv::Scalar(0,255,0), false);
-
-for (const auto &f : fractals)
-    std::cout << "id=" << f.id << " corner0=" << f.corners[0] << "\n";
+// Generate PRISMarker D2, ID 0.
+cv::Mat image;
+cv::aruco2::getPrismaMarkerImage(image, cv::aruco2::PRISMA_D2, 0, 10, aux);
+cv::imwrite("prisma_D2_0.png", image);
 ```
 
-### Fractal marker pose estimation
+The `aruco2_print` utility can generate individual markers or entire dictionaries:
 
-Use `getSolvePnpPoints` to obtain all inner and outer
-corners — far more correspondences than a plain marker provides:
+```bash
+# One D2 marker (MIP 36h12):
+./build-prisma/aruco2_print p prisma_D2_0.png PRISMA_D2 -aux=DICT_ARUCO_MIP_36h12 0 10
+
+# All 133 D3 markers (AprilTag 36h10):
+./build-prisma/aruco2_print p ./prisma_d3_all PRISMA_D3 -aux=DICT_APRILTAG_36h10 all 10
+```
+
+#### Detect PRISMarkers
 
 ```cpp
-cv::Mat cameraMatrix, distCoeffs; // from calibration
+#include "opencv2/objdetect/aruco2.hpp"
 
-auto fractals = cv::aruco2::detectFractals(image, cv::aruco2::FRACTAL_3L_6);
+cv::aruco2::PrismaDetector detector(
+    cv::aruco2::PRISMA_D2, cv::aruco2::DICT_ARUCO_MIP_36h12);
 
-for (const auto &f : fractals) {
-    cv::Mat imgPts, objPts, rvec, tvec;
-    cv::aruco2::getSolvePnpPoints(f, objPts, imgPts, 0.10f); // 10 cm outer marker
-    cv::solvePnP(objPts, imgPts, cameraMatrix, distCoeffs, rvec, tvec);
+auto markers = detector.detect(image);
+cv::aruco2::drawPrisma(image, markers);
+for (const auto& marker : markers)
+    std::cout << "id=" << marker.id << " levels=" << marker.getNLevels() << "\n";
+```
+
+The utility accepts a local image, a folder of images or a local
+video file (`.mp4`, `.avi`, `.mkv`, `.mov`, etc.)
+
+```bash
+# Detect and save a detected image:
+./build-prisma/aruco2_detect_prisma image.png \
+  -dict=PRISMA_D2 -aux=DICT_ARUCO_MIP_36h12 \
+  -show=false -save=./detected
+
+# Detect and save a detected video:
+./build-prisma/aruco2_detect_prisma video.mp4 \
+  -dict=PRISMA_D2 -aux=DICT_ARUCO_MIP_36h12 \
+  -show=false -save=./detected
+```
+
+
+
+#### PRISMarker pose estimation
+
+PRISMarker pose is estimated using `getSolvePnpPoints()` and `solvePnP()`, as with the other marker types.
+
+```cpp
+#include "opencv2/objdetect/aruco2.hpp"
+#include <opencv2/calib3d.hpp>
+
+cv::Mat cameraMatrix, distCoeffs; // Load from camera calibration
+
+auto markers = cv::aruco2::detectPrismaMarkers(
+    image, cv::aruco2::PRISMA_D2, true,
+    cv::aruco2::DICT_ARUCO_MIP_36h12);
+
+for (const auto& marker : markers) {
+    cv::Mat objPts, imgPts, rvec, tvec;
+
+    cv::aruco2::getSolvePnpPoints(marker, objPts, imgPts, 0.20f);
+
+    if (objPts.total() >= 4 && objPts.total() == imgPts.total() &&
+        cv::solvePnP(objPts, imgPts, cameraMatrix, distCoeffs, rvec, tvec)) {
+        cv::aruco2::drawAxis(image, cameraMatrix, distCoeffs,
+                             rvec, tvec, 0.10f);
+    }
 }
-
 ```
+
+To display the pose axes in the annotated output, use `-calib` and `-ms`:
+
+```bash
+./build-prisma/aruco2_detect_prisma image.png \
+  -dict=PRISMA_D2 -aux=DICT_ARUCO_MIP_36h12 \
+  -calib=camera.yml -ms=0.20 -show=false -save=./annotated
+```
+
+The calibration must match the camera, and `-ms` specifies the outer marker size in metres.
+
 
 ### RArUco marker generation and detection
 
@@ -400,7 +467,7 @@ for (const auto &m : markers) {
 
 ### OpenCL / GPU Acceleration
 
-`aruco2` features a high-performance, fully GPU-accelerated detection pipeline using OpenCL for fiducial markers, boards, diamonds, fractals, and RArUco markers. Key stages—including image thresholding, connected component labeling, corner extraction, candidate identification, and subpixel corner refinement—are run entirely on the GPU.
+`aruco2` provides optional OpenCL acceleration for its conventional fiducial-marker detection pipeline, used by standard markers, boards, diamonds, and other supported modes. PRISMarker has additional CPU-side layout matching, hypothesis validation, and geometry-guided pose refinement; **OpenCL acceleration is not claimed for the entire PRISMarker pipeline**.
 
 #### How to use it
 To trigger GPU acceleration, simply pass the input image as a `cv::UMat` instead of `cv::Mat` to functions like `detectFiducialMarkers()` or `detectRArucoMarkers()`. The library detects the input type and automatically routes it to the OpenCL pipeline.
@@ -511,6 +578,29 @@ Key advantages over standard OpenCV ChArUco:
 
 ---
 
+### PRISMarker — recursive predefined inset dictionaries
+
+The PRISMarker implementation follows the manuscript *"PRISMarker: A Predefined
+Recursive Inset Scheme for Wide-Range Pose Estimation"* (2026). Its main design
+choices are:
+
+- **Dictionaries, not just a single pattern:** PRISMarker IDs are generated
+  deterministically for any supported auxiliary dictionary and depth D1–D4.
+- **No ambiguous reused components within a dictionary:** each binary layout
+  and each central/auxiliary codeword is assigned to at most one PRISMarker at
+  that depth. A detected component determines the marker and its location.
+- **Two complementary level types:** CORNERS (four auxiliary tags at the
+  corners) and CARDINAL (four at the side midpoints), alternating by level.
+- **Geometry-guided pose refinement:** project known layout corners from a
+  detected homography, search only near their predicted locations, and combine
+  reliable correspondences from the visible levels and auxiliary markers.
+
+The pattern banks live in `src/prisma_dicts/data.hpp`; the depth-specific
+selectors are `d1.hpp`–`d4.hpp`. `src/aruco2_prisma_predefined.cpp` builds the
+selected dictionary based on the auxiliary codeword count. The same data is
+used for printing and detection. Preparing a `PrismaDetector` once and reusing
+it across video frames avoids reloading its dictionary each frame.
+
 ### Recursive ArUco (RArUco) markers
 
 RArUco markers are described in:
@@ -518,9 +608,9 @@ RArUco markers are described in:
 
 Key features and implementation details:
 - **Unified ID across scales** — embedding the same marker ID at all levels of recursion ensures that a UAV drone can unambiguously identify and land on its designated landing pad, regardless of altitude/zoom.
-- **Center-occlusion robustness** — unlike standard, Fractal, or Embedded ArUco markers, RArUco does not depend on the marker's center. Instead, a modified bit-sampling strategy reads bit values from a border region of width `b`, ignoring the center where nested sub-markers reside.
+- **Center-occlusion robustness** — RArUco does not depend on observing its center. Instead, a modified bit-sampling strategy reads bit values from a border region of width `b`, ignoring the center where nested sub-markers reside.
 - **Double color mode detection** — markers are embedded within both black and white bits. Embedded markers in black bits are color-inverted, requiring the detector to look for both standard and inverted candidates.
-- **Highly efficient** — runs at ~185 FPS (tested on Intel Core i7-13700H), outperforming both standard ArUco (~85 FPS) and Fractal markers (~76 FPS).
+- **Highly efficient** — reported at approximately 185 FPS on Intel Core i7-13700H in the cited RArUco evaluation (versus approximately 85 FPS for standard ArUco in that experiment).
 - **Graceful degradation** — maintains a 100% detection rate at up to 30% occlusion and when cropped up to 60% (only 40% area visible).
 
 ---
@@ -554,10 +644,11 @@ cmake --build build
 | Pose estimation — board | done |
 | Pose estimation — diamond | done |
 | Draw coordinate axes (`drawAxis`) | done |
-| Generate fractal marker images | done |
-| Fractal marker detection | done |
-| Draw detected fractal markers | done |
-| Pose estimation — fractal marker | done |
+| Generate PRISMarker D1–D4 images | done |
+| PRISMarker detection (images and local video) | done |
+| Draw detected PRISMarkers | done |
+| Pose estimation — PRISMarker | done |
+| Configurable auxiliary dictionaries (24 supported) | done |
 | Generate RArUco marker images | done |
 | RArUco marker detection | done |
 | OpenCL GPU acceleration | done |

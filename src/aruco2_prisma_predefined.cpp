@@ -1,215 +1,156 @@
+// Generic PRISMarker dictionaries: one layout sequence per PRISMarker ID,
+// selected deterministically for D1-D4 and the chosen auxiliary dictionary.
 #include "aruco2_prisma_dict.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <iterator>
 #include <string>
 #include <utility>
+#include <vector>
 
-#include "prisma_dicts/n1_mip.hpp"
-#include "prisma_dicts/n2_mip.hpp"
-#include "prisma_dicts/n3_mip.hpp"
-#include "prisma_dicts/n4_mip.hpp"
-#include "prisma_dicts/n1_april.hpp"
-#include "prisma_dicts/n2_april.hpp"
-#include "prisma_dicts/n3_april.hpp"
-#include "prisma_dicts/n4_april.hpp"
+#include "prisma_dicts/d1.hpp"
+#include "prisma_dicts/d2.hpp"
+#include "prisma_dicts/d3.hpp"
+#include "prisma_dicts/d4.hpp"
 
 namespace cv {
 namespace aruco2 {
 namespace {
 
 namespace pd = predef;
+namespace bank = pd::pattern_bank;
 
-struct Info
-{
+struct Info {
     PrismaDict type;
-    DictionaryType aux;
     const char* name;
-    std::size_t count;
+    int depth;
+    std::size_t capacity;
 };
 
-static constexpr Info dicts[] = {
-    {pd::n1_mip::type,   pd::n1_mip::aux,   pd::n1_mip::name,   std::size(pd::n1_mip::markers)},
-    {pd::n2_mip::type,   pd::n2_mip::aux,   pd::n2_mip::name,   std::size(pd::n2_mip::markers)},
-    {pd::n3_mip::type,   pd::n3_mip::aux,   pd::n3_mip::name,   std::size(pd::n3_mip::markers)},
-    {pd::n4_mip::type,   pd::n4_mip::aux,   pd::n4_mip::name,   std::size(pd::n4_mip::markers)},
-    {pd::n1_april::type, pd::n1_april::aux, pd::n1_april::name, std::size(pd::n1_april::markers)},
-    {pd::n2_april::type, pd::n2_april::aux, pd::n2_april::name, std::size(pd::n2_april::markers)},
-    {pd::n3_april::type, pd::n3_april::aux, pd::n3_april::name, std::size(pd::n3_april::markers)},
-    {pd::n4_april::type, pd::n4_april::aux, pd::n4_april::name, std::size(pd::n4_april::markers)}
+static constexpr Info kInfos[] = {
+    {PRISMA_D1, "PRISMA_D1", 1, pd::d1::CAPACITY},
+    {PRISMA_D2, "PRISMA_D2", 2, pd::d2::CAPACITY},
+    {PRISMA_D3, "PRISMA_D3", 3, pd::d3::CAPACITY},
+    {PRISMA_D4, "PRISMA_D4", 4, pd::d4::CAPACITY}
 };
 
-const Info* findInfo(PrismaDict type)
-{
-    for (const auto& d : dicts)
-        if (d.type == type)
-            return &d;
-
-    return nullptr;
-}
-
-const Info* findInfo(const cv::String& name)
-{
-    for (const auto& d : dicts)
-        if (name == d.name)
-            return &d;
-
-    return nullptr;
-}
-
-[[noreturn]] void fail(const std::string& msg)
-{
+[[noreturn]] void fail(const std::string& msg) {
     CV_Error(cv::Error::StsBadArg, msg);
 }
 
-std::vector<unsigned char> unpack(
-    const std::array<std::uint8_t, pd::BYTES>& src
-)
-{
+const Info& findInfo(PrismaDict type) {
+    for (const Info& d : kInfos)
+        if (d.type == type) return d;
+    fail("Invalid PRISMarker level: " + std::to_string(static_cast<int>(type)));
+}
+
+const Info& findInfo(const cv::String& name) {
+    for (const Info& d : kInfos)
+        if (name == d.name) return d;
+    fail("Invalid PRISMarker level name: " + std::string(name));
+}
+
+int markerCount(const Info& info, DictionaryType auxiliaryDictionary) {
+    const DictInfo& aux = getDictInfo(auxiliaryDictionary);
+    if (aux.count <= 0)
+        fail("Auxiliary dictionary has no usable codes");
+
+    // Respect both resource bounds: auxiliary IDs (center + 4 per level)
+    // and unique level layouts from the two banks.
+    const int byAuxiliary = aux.count / (4 * info.depth + 1);
+    const int byPatterns = static_cast<int>(info.capacity);
+    return byAuxiliary < byPatterns ? byAuxiliary : byPatterns;
+}
+
+std::vector<unsigned char> unpack(const std::array<std::uint8_t, pd::BYTES>& packed) {
     std::vector<unsigned char> bits(pd::BITS, 0u);
-
     for (std::size_t i = 0; i < pd::BITS; ++i)
-        bits[i] = static_cast<unsigned char>(
-            (src[i >> 3u] >> (i & 7u)) & 1u
-        );
-
+        bits[i] = static_cast<unsigned char>((packed[i / 8u] >> (i % 8u)) & 1u);
     return bits;
 }
 
-// Convert the compact compile-time representation into the simple logical one.
-template<std::size_t L, std::size_t M>
-detail::PDict makeDict(
-    const pd::Marker<L> (&src)[M],
-    DictionaryType arucoDict
-)
-{
-    detail::PDict dict;
-    dict.arucoDict = arucoDict;
-    dict.markers.reserve(M);
+template<std::size_t L>
+detail::PMark makeMarker(std::size_t id, const std::array<bank::Ref, L>& refs) {
+    detail::PMark mark;
+    mark.id = static_cast<int>(id);
+    constexpr int stride = static_cast<int>(4u * L + 1u);
+    mark.center = stride * mark.id;
+    mark.levels.reserve(L);
 
-    for (std::size_t id = 0; id < M; ++id)
-    {
-        const auto& srcMark = src[id];
+    // refs are ordered outermost -> innermost.
+    for (std::size_t j = 0; j < L; ++j) {
+        const bank::Ref ref = refs[j];
+        if (ref.index >= bank::BANK_SIZE)
+            fail("PRISMarker pattern index outside the 200-entry bank");
 
-        detail::PMark mark;
-        mark.id = static_cast<int>(id);
-        mark.center = srcMark.center;
-        mark.levels.reserve(L);
+        const auto& packed = (ref.kind == bank::Kind::Corners)
+            ? bank::corners[ref.index] : bank::cardinal[ref.index];
 
-        for (const auto& srcLevel : srcMark.levels)
-        {
-            detail::PLevel level;
-            level.n = pd::N;
-            level.k = pd::K;
-            level.layout = srcLevel.layout;
+        detail::PLevel level;
+        level.n = pd::N;
+        level.k = pd::K;
+        level.layout = (ref.kind == bank::Kind::Corners)
+            ? PRISMA_LAYOUT_CORNERS : PRISMA_LAYOUT_CARDINAL;
+        level.bits = unpack(packed);
 
-            for (std::size_t i = 0; i < srcLevel.ids.size(); ++i)
-                level.aruco[i] = srcLevel.ids[i];
-
-            level.bits = unpack(srcLevel.bits);
-            mark.levels.push_back(std::move(level));
-        }
-
-        dict.markers.push_back(std::move(mark));
+        // Match the historic allocation: center at stride*ID, first four aux
+        // IDs for innermost level, last four for outermost level.
+        const int first = mark.center + 1 + 4 * static_cast<int>(L - j - 1);
+        for (std::size_t k = 0; k < 4; ++k)
+            level.aruco[k] = first + static_cast<int>(k);
+        mark.levels.push_back(std::move(level));
     }
+    return mark;
+}
 
-    return dict;
+template<std::size_t L, typename Choose>
+detail::PDict build(DictionaryType auxiliaryDictionary, std::size_t count,
+                    Choose choose) {
+    detail::PDict result;
+    result.arucoDict = auxiliaryDictionary;
+    result.markers.reserve(count);
+    for (std::size_t i = 0; i < count; ++i)
+        result.markers.push_back(makeMarker<L>(i, choose(i)));
+    return result;
 }
 
 } // namespace
 
-cv::String getPrismaName(PrismaDict type)
-{
-    const Info* d = findInfo(type);
+cv::String getPrismaName(PrismaDict type) { return findInfo(type).name; }
 
-    if (!d)
-        fail(
-            "Invalid predefined PRISMarker dictionary type: " +
-            std::to_string(static_cast<int>(type))
-        );
+PrismaDict getPrismaType(const cv::String& name) { return findInfo(name).type; }
 
-    return d->name;
+int getPrismaCount(PrismaDict type, DictionaryType auxiliaryDictionary) {
+    return markerCount(findInfo(type), auxiliaryDictionary);
 }
 
-PrismaDict getPrismaType(const cv::String& name)
-{
-    const Info* d = findInfo(name);
-
-    if (!d)
-        fail("Invalid predefined PRISMarker dictionary name: " + std::string(name));
-
-    return d->type;
-}
-
-DictionaryType getPrismaDict(PrismaDict type)
-{
-    const Info* d = findInfo(type);
-
-    if (!d)
-        fail(
-            "Invalid predefined PRISMarker dictionary type: " +
-            std::to_string(static_cast<int>(type))
-        );
-
-    return d->aux;
-}
-
-int getPrismaCount(PrismaDict type)
-{
-    const Info* d = findInfo(type);
-
-    if (!d)
-        fail(
-            "Invalid predefined PRISMarker dictionary type: " +
-            std::to_string(static_cast<int>(type))
-        );
-
-    return static_cast<int>(d->count);
-}
-
-std::vector<cv::String> getPrismaNames()
-{
+std::vector<cv::String> getPrismaNames() {
     std::vector<cv::String> names;
-    names.reserve(std::size(dicts));
-
-    for (const auto& d : dicts)
-        names.emplace_back(d.name);
-
+    names.reserve(4);
+    for (const Info& d : kInfos) names.emplace_back(d.name);
     return names;
 }
 
 namespace detail {
 
-PDict loadPDict(PrismaDict type)
-{
-    switch (type)
-    {
-        case pd::n1_mip::type:   return makeDict(pd::n1_mip::markers,   pd::n1_mip::aux);
-        case pd::n2_mip::type:   return makeDict(pd::n2_mip::markers,   pd::n2_mip::aux);
-        case pd::n3_mip::type:   return makeDict(pd::n3_mip::markers,   pd::n3_mip::aux);
-        case pd::n4_mip::type:   return makeDict(pd::n4_mip::markers,   pd::n4_mip::aux);
-        case pd::n1_april::type: return makeDict(pd::n1_april::markers, pd::n1_april::aux);
-        case pd::n2_april::type: return makeDict(pd::n2_april::markers, pd::n2_april::aux);
-        case pd::n3_april::type: return makeDict(pd::n3_april::markers, pd::n3_april::aux);
-        case pd::n4_april::type: return makeDict(pd::n4_april::markers, pd::n4_april::aux);
+PDict loadPDict(PrismaDict type, DictionaryType auxiliaryDictionary) {
+    const Info& info = findInfo(type);
+    const std::size_t count =
+        static_cast<std::size_t>(markerCount(info, auxiliaryDictionary));
+    switch (info.depth) {
+        case 1: return build<1>(auxiliaryDictionary, count, pd::d1::select);
+        case 2: return build<2>(auxiliaryDictionary, count, pd::d2::select);
+        case 3: return build<3>(auxiliaryDictionary, count,
+            [count](std::size_t id) { return pd::d3::select(id, count); });
+        case 4: return build<4>(auxiliaryDictionary, count,
+            [count](std::size_t id) { return pd::d4::select(id, count); });
+        default: fail("Unsupported PRISMarker level");
     }
-
-    fail(
-        "Invalid predefined PRISMarker dictionary type: " +
-        std::to_string(static_cast<int>(type))
-    );
 }
 
-PDict loadPDict(const cv::String& name)
-{
-    const Info* d = findInfo(name);
-
-    if (!d)
-        fail("Invalid predefined PRISMarker dictionary name: " + std::string(name));
-
-    return loadPDict(d->type);
+PDict loadPDict(const cv::String& name, DictionaryType auxiliaryDictionary) {
+    return loadPDict(findInfo(name).type, auxiliaryDictionary);
 }
 
 } // namespace detail

@@ -57,14 +57,10 @@ enum PrismaLayout {
 
 /** @brief Predefined PRISMarker dictionaries. */
 enum PrismaDict {
-    PRISMA_D1_ARUCO_MIP_36H12 = 0,
-    PRISMA_D2_ARUCO_MIP_36H12,
-    PRISMA_D3_ARUCO_MIP_36H12,
-    PRISMA_D4_ARUCO_MIP_36H12,
-    PRISMA_D1_APRILTAG_36H11,
-    PRISMA_D2_APRILTAG_36H11,
-    PRISMA_D3_APRILTAG_36H11,
-    PRISMA_D4_APRILTAG_36H11
+    PRISMA_D1 = 0,
+    PRISMA_D2,
+    PRISMA_D3,
+    PRISMA_D4
 };
 
 /** @brief Name of a predefined PRISMarker dictionary. */
@@ -73,11 +69,11 @@ CV_EXPORTS_W cv::String getPrismaName(PrismaDict dictionary);
 /** @brief Find a predefined PRISMarker dictionary by name. */
 CV_EXPORTS_W PrismaDict getPrismaType(const cv::String& name);
 
-/** @brief Get its underlying ArUco dictionary. */
-CV_EXPORTS_W DictionaryType getPrismaDict(PrismaDict dictionary);
-
-/** @brief Number of markers in a PRISMarker dictionary. */
-CV_EXPORTS_W int getPrismaCount(PrismaDict dictionary);
+/** @brief Number of PRISMarkers available for the auxiliary dictionary. */
+CV_EXPORTS_W int getPrismaCount(
+    PrismaDict dictionary,
+    DictionaryType auxiliaryDictionary = DICT_ARUCO_MIP_36h12
+);
 
 /** @brief Names of all predefined PRISMarker dictionaries. */
 CV_EXPORTS_W std::vector<cv::String> getPrismaNames();
@@ -547,7 +543,7 @@ private:
         float markerSize
     );
 
-    friend void drawPrisma(
+    friend void drawPrismaMarkers(
         InputOutputArray image,
         const std::vector<PrismaMarker>& markers,
         Scalar color,
@@ -559,11 +555,17 @@ private:
 class CV_EXPORTS_W PrismaDetector
 {
 public:
-    CV_WRAP PrismaDetector(PrismaDict dictionary);
+    CV_WRAP PrismaDetector(
+    PrismaDict dictionary,
+    DictionaryType auxiliaryDictionary = DICT_ARUCO_MIP_36h12
+    );
 
     ~PrismaDetector();
 
-    CV_WRAP void setDictionary(PrismaDict dictionary);
+    CV_WRAP void setDictionary(
+        PrismaDict dictionary,
+        DictionaryType auxiliaryDictionary = DICT_ARUCO_MIP_36h12
+    );
 
     CV_WRAP std::vector<PrismaMarker> detect(
         InputArray image,
@@ -575,22 +577,35 @@ private:
     cv::Ptr<PData> data;
 };
 
-/** @brief Generate PRISMarker images. */
-CV_EXPORTS_W std::vector<cv::Mat> printPrisma(
+/** @brief Render one PRISMarker to a grayscale image.
+ *
+ * @param image Output marker image (CV_8UC1).
+ * @param dictionary PRISMarker depth (PRISMA_D1 to PRISMA_D4).
+ * @param markerId PRISMarker ID in the selected dictionary (must be >= 0).
+ * @param bitSize Size of one innermost-level cell in pixels; -1 selects the default.
+ * @param auxiliaryDictionary Dictionary used for central and auxiliary markers.
+ *
+ * To generate an entire PRISMarker dictionary, iterate from ID 0 to
+ * getPrismaCount(dictionary, auxiliaryDictionary) - 1.
+ */
+CV_EXPORTS_W void getPrismaMarkerImage(
+    OutputArray image,
     PrismaDict dictionary,
-    int markerId = -1,
-    int bitSize = -1
+    int markerId = 0,
+    int bitSize = -1,
+    DictionaryType auxiliaryDictionary = DICT_ARUCO_MIP_36h12
 );
 
 /** @brief Detect PRISMarkers in an image. */
-CV_EXPORTS_W std::vector<PrismaMarker> detectPrisma(
+CV_EXPORTS_W std::vector<PrismaMarker> detectPrismaMarkers(
     InputArray image,
     PrismaDict dictionary,
-    bool pose = false
+    bool pose = false,
+    DictionaryType auxiliaryDictionary = DICT_ARUCO_MIP_36h12
 );
 
 /** @brief Draw detected PRISMarkers. */
-CV_EXPORTS_W void drawPrisma(
+CV_EXPORTS_W void drawPrismaMarkers(
     InputOutputArray image,
     const std::vector<PrismaMarker>& markers,
     Scalar color = Scalar(0, 255, 0),
