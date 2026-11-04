@@ -1,6 +1,6 @@
 # aruco2 — A Simpler ArUco for OpenCV 
 
-<img src="./types.png" width="28%" alt="Example PRISMarker with four nested levels"/>
+<img src="./types.png" width="65%" alt="Example PRISMarker with four nested levels"/>
 
 A proposed replacement for the ArUco module in OpenCV (fully compatible and compiling with both OpenCV 5 and OpenCV 4), by the original ArUco author. This repository serves as the standalone version of the implementation proposed in [OpenCV PR #29063](https://github.com/opencv/opencv/pull/29063) before it is accepted (if it ever is) in the official OpenCV.
 
