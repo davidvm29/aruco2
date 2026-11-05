@@ -141,13 +141,13 @@ PDict loadPDict(PrismaDict type, DictionaryType auxiliaryDictionary) {
     switch (info.depth) {
         case 1: return build<1>(auxiliaryDictionary, count, pd::d1::select);
         case 2: return build<2>(auxiliaryDictionary, count, pd::d2::select);
-        case 3: return build<3>(auxiliaryDictionary, count,
-            [count](std::size_t id) { return pd::d3::select(id, count); });
-        case 4: return build<4>(auxiliaryDictionary, count,
-            [count](std::size_t id) { return pd::d4::select(id, count); });
-        default: fail("Unsupported PRISMarker level");
+        case 3: return build<3>(auxiliaryDictionary, count, pd::d3::select);
+        case 4: return build<4>(auxiliaryDictionary, count, pd::d4::select);
+        default:
+            fail("Unsupported PRISMarker level");
     }
 }
+
 
 PDict loadPDict(const cv::String& name, DictionaryType auxiliaryDictionary) {
     return loadPDict(findInfo(name).type, auxiliaryDictionary);
