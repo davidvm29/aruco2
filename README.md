@@ -105,7 +105,7 @@ struct PrismaMarker {
 | `detectFiducialMarkers(image, {dictionary, …})` → `vector<FiducialMarker>` | find markers across multiple dictionaries |
 | `detectGridBoard(image, gridSize, dictionary, board)` → `bool` | find a grid board |
 | `detectDiamonds(image, dictionary)` → `vector<Diamond>` | find diamond markers |
-|`detectPrismaMarkers(image, PRISMA_Dx, pose, auxiliaryDictionary)` → `vector<PrismaMarker>` | find PRISMarkers in an image | |
+| `detectPrismaMarkers(image, PRISMA_Dx, pose, auxiliaryDictionary)` → `vector<PrismaMarker>` | find PRISMarkers in an image | |
 | `detectRArucoMarkers(image, dictionary, params)` → `vector<FiducialMarker>` | find RArUco markers (ignores center details using border-sampling) |
 | `drawFiducialMarkers(image, markers)` | draw marker outlines and ids |
 | `drawGridBoard(image, board)` | draw detected board corners |

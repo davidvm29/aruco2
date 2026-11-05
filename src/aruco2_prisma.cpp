@@ -27,6 +27,7 @@
 #include <array>
 #include <limits>
 #include <utility>
+#include <numeric>
 #include <unordered_map>
 
 
@@ -4170,15 +4171,11 @@ namespace aruco2 {
 // Predefined PRISMarkers
 namespace {
 
-// Cell size in pixels of the innermost level. It must be a multiple of
-// kPrismaBitSizeStep: each auxiliary ArUco ((n + 4) = 10 cells with its
-// white margin) fills 2 level cells, and the central ArUco (8 cells) fills 4,
-// so with other sizes their cells are fractional and nearest-neighbour
-// resizing draws them up to one pixel off-center, which the detector, which
-// assumes centred markers, turns into a pose bias. The outer levels have
-// 3, 9, ... times this size, so they are exact too.
+// Default pixel size of a cell in the innermost PRISMarker level.
+// Prefer exact rasterization when it requires a small size adjustment.
+// Otherwise, use symmetric rasterization to avoid oversized images.
 constexpr int kPrismaInnerCellSize = 10;
-constexpr int kPrismaBitSizeStep = 10;
+constexpr int kPrismaMaxExactStep = 16;
 constexpr int kPrismaReservationCells = 2;
 constexpr int kPrismaChildPaddingCells = 1;
 
@@ -4401,6 +4398,53 @@ static std::set<int> getUniqueArucoIds(
     return result;
 }
 
+// Nearest-neighbour scaling with a mirrored coordinate map.
+// Keeps the margins symmetric when cells have fractional pixel sizes.
+static void resizePrismaCentered(
+    const cv::Mat& source,
+    cv::Mat& destination,
+    const cv::Size& targetSize
+)
+{
+    CV_Assert(!source.empty() && source.type() == CV_8UC1);
+    CV_Assert(source.rows == source.cols);
+    CV_Assert(targetSize.width == targetSize.height);
+    CV_Assert(targetSize.width > 0 && targetSize.width % 2 == 0);
+
+    const int sourceSide = source.cols;
+    const int targetSide = targetSize.width;
+
+    std::vector<int> sourceIndex(targetSide);
+
+    for (int x = 0; x < targetSide / 2; ++x)
+    {
+        const int index = static_cast<int>(
+            ((2LL * x + 1) * sourceSide) /
+            (2LL * targetSide)
+        );
+
+        sourceIndex[x] = std::min(index, sourceSide - 1);
+
+        sourceIndex[targetSide - x - 1] =
+            sourceSide - sourceIndex[x] - 1;
+    }
+
+    destination.create(targetSize, CV_8UC1);
+
+    for (int y = 0; y < targetSide; ++y)
+    {
+        const uchar* sourceRow =
+            source.ptr<uchar>(sourceIndex[y]);
+
+        uchar* targetRow = destination.ptr<uchar>(y);
+
+        for (int x = 0; x < targetSide; ++x)
+        {
+            targetRow[x] = sourceRow[sourceIndex[x]];
+        }
+    }
+}
+
 static void putAruco(
     cv::Mat& image,
     DictionaryType dictionary,
@@ -4433,7 +4477,7 @@ static void putAruco(
         prismarkerFail("Could not generate auxiliary ArUco", "getPrismaMarkerImage");
 
     cv::Mat resized;
-    cv::resize(fiducial, resized, roi.size(), 0.0, 0.0, cv::INTER_NEAREST);
+    resizePrismaCentered(fiducial, resized, roi.size());
     resized.copyTo(image(roi));
 }
 // Render one level with its auxiliary ArUcos.
@@ -4533,7 +4577,17 @@ static cv::Mat drawFLevel(
         );
 
         if (child.size() != childRoi.size())
-            cv::resize(child, child, childRoi.size(), 0.0, 0.0, cv::INTER_NEAREST);
+        {
+            cv::Mat resizedChild;
+
+            resizePrismaCentered(
+                child,
+                resizedChild,
+                childRoi.size()
+            );
+
+            child = std::move(resizedChild);
+        }
 
         child.copyTo(image(childRoi));
     }
@@ -4632,7 +4686,67 @@ static bool estimateCorners(
 
 } // anonymous namespace
 
-// Render one PRISMarker; batch printing is handled by the CLI via getPrismaCount().
+// Select a suitable cell size for the auxiliary dictionary.
+// Round up when exact rasterization requires a small adjustment.
+// For large exact steps, use symmetric fractional rasterization.
+static int prismaPrintCellSize(
+    int requestedBitSize,
+    DictionaryType auxiliary
+)
+{
+    const int n = getDictInfo(auxiliary).bits;
+
+    if (n <= 0)
+    {
+        prismarkerFail(
+            "Invalid auxiliary dictionary bit size",
+            "getPrismaMarkerImage"
+        );
+    }
+
+    const int desired =
+        requestedBitSize == -1
+            ? kPrismaInnerCellSize
+            : requestedBitSize;
+
+    // Ensure at least one pixel per auxiliary source cell.
+    const int minimum = (n + 5) / 2;
+    const int size = std::max(desired, minimum);
+
+    // Auxiliary marker: (n + 4) cells in 2 level cells.
+    const int auxiliaryStep =
+        (n + 4) / std::gcd(n + 4, 2);
+
+    // Central marker: (n + 2) cells in 4 level cells.
+    const int centralStep =
+        (n + 2) / std::gcd(n + 2, 4);
+
+    const int exactStep =
+        std::lcm(auxiliaryStep, centralStep);
+
+    // Avoid huge images for dictionaries requiring large steps.
+    if (exactStep > kPrismaMaxExactStep)
+    {
+        return size;
+    }
+
+    const int64_t rounded =
+        ((static_cast<int64_t>(size) + exactStep - 1)
+            / exactStep) * exactStep;
+
+    if (rounded > std::numeric_limits<int>::max())
+    {
+        prismarkerFail(
+            "Requested bitSize is too large",
+            "getPrismaMarkerImage"
+        );
+    }
+
+    return static_cast<int>(rounded);
+}
+
+// Render one PRISMarker; batch printing is handled by the CLI
+// via getPrismaCount().
 static cv::Mat renderPrismaImage(
     const PDict& dict,
     int markerId,
@@ -4647,23 +4761,67 @@ static cv::Mat renderPrismaImage(
         );
     }
 
-    if (bitSize != -1 && bitSize % kPrismaBitSizeStep != 0)
+    const PMark& marker =
+        getPrismaMarker(dict, markerId);
+
+    // Automatically select a suitable size.
+    const int lastLevelBitSize =
+        prismaPrintCellSize(
+            bitSize,
+            dict.arucoDict
+        );
+
+    // Calculate the final image size before allocating memory.
+    int64_t outerCellSize = lastLevelBitSize;
+
+    for (
+        int i = static_cast<int>(marker.levels.size()) - 2;
+        i >= 0;
+        --i
+    )
+    {
+        const PLevel& parent = marker.levels[i];
+        const PLevel& child = marker.levels[i + 1];
+
+        const int64_t childCells =
+            parent.k - 2 * kPrismaChildPaddingCells;
+
+        if (childCells <= 0)
+        {
+            prismarkerFail(
+                "Invalid PRISMarker level geometry",
+                "getPrismaMarkerImage"
+            );
+        }
+
+        outerCellSize =
+            (outerCellSize * (child.n + 2)
+                + childCells - 1) / childCells;
+    }
+
+    if (marker.levels.empty())
     {
         prismarkerFail(
-            "bitSize must be a multiple of " +
-                std::to_string(kPrismaBitSizeStep) +
-                " so that the auxiliary and central ArUcos are drawn exactly",
+            "PRISMarker has no levels",
             "getPrismaMarkerImage"
         );
     }
 
-    const int lastLevelBitSize =
-        bitSize == -1
-            ? kPrismaInnerCellSize
-            : bitSize;
+    // Prevent integer overflow in OpenCV image dimensions.
+    const int64_t maxDimension = std::numeric_limits<int>::max();
+
+    if (outerCellSize > maxDimension ||
+        outerCellSize >
+            maxDimension / (marker.levels.front().n + 4LL))
+    {
+        prismarkerFail(
+            "Requested bitSize exceeds OpenCV image dimension limits",
+            "getPrismaMarkerImage"
+        );
+    }
 
     return drawPRISMarker(
-        getPrismaMarker(dict, markerId),
+        marker,
         dict.arucoDict,
         lastLevelBitSize
     );
