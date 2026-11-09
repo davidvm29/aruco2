@@ -491,18 +491,20 @@ enum PrismaType {
 class PrismaDetector;
 
 /** @brief A detected PRISMarker. */
+
 struct CV_EXPORTS_W_SIMPLE PrismaMarker
 {
     CV_WRAP PrismaMarker() {}
 
     CV_PROP_RW std::vector<cv::Point2f> corners;
-    CV_PROP_RW PrismaType type;
+    CV_PROP_RW PrismaType type = PRISMA_CUSTOM;
     CV_PROP_RW int id = -1;
 
     CV_WRAP Point2f getCorner(int i) const {
-        return corners[i];
+        CV_Assert(i >= 0 &&
+                  static_cast<std::size_t>(i) < corners.size());
+        return corners[static_cast<std::size_t>(i)];
     }
-
     // Number of detected levels, excluding the central ArUco.
     CV_WRAP int getNLevels() const {
         int n = 0;

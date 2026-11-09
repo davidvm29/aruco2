@@ -2961,8 +2961,13 @@ DetectionContext Detector::extractCandidates(const cv::Mat& img) const
 
     if (img.channels() == 3)
         cv::cvtColor(img, context.gray, cv::COLOR_BGR2GRAY);
-    else
+    else if (img.channels() == 4)
+        cv::cvtColor(img, context.gray, cv::COLOR_BGRA2GRAY);
+    else if (img.channels() == 1)
         context.gray = img;
+    else
+        CV_Error(cv::Error::StsBadArg,
+                "Unsupported image channel count");
 
     if (context.gray.type() != CV_8UC1)
     {
