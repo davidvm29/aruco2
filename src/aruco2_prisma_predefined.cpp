@@ -134,6 +134,23 @@ std::vector<cv::String> getPrismaNames() {
 
 namespace detail {
 
+PMark loadPMarker(PrismaDict type, DictionaryType auxiliaryDictionary, int markerId) {
+    const Info& info = findInfo(type);
+    const int count = markerCount(info, auxiliaryDictionary);
+    if (markerId < 0 || markerId >= count)
+        fail("PRISMarker id not found: " + std::to_string(markerId));
+
+    const std::size_t id = static_cast<std::size_t>(markerId);
+    switch (info.depth) {
+        case 1: return makeMarker<1>(id, pd::d1::select(id));
+        case 2: return makeMarker<2>(id, pd::d2::select(id));
+        case 3: return makeMarker<3>(id, pd::d3::select(id));
+        case 4: return makeMarker<4>(id, pd::d4::select(id));
+        default:
+            fail("Unsupported PRISMarker level");
+    }
+}
+
 PDict loadPDict(PrismaDict type, DictionaryType auxiliaryDictionary) {
     const Info& info = findInfo(type);
     const std::size_t count =

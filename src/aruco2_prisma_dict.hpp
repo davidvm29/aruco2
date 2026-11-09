@@ -50,7 +50,14 @@ struct PDict
     std::vector<PMark> markers;
 };
 
-// Load a predefined PRISMarker dictionary with the selected auxiliary dictionary.
+// Build only the requested marker (used by image generation).
+PMark loadPMarker(
+    PrismaDict type,
+    DictionaryType auxiliaryDictionary,
+    int markerId
+);
+
+// Load the complete dictionary (used by the detector).
 PDict loadPDict(
     PrismaDict type,
     DictionaryType auxiliaryDictionary

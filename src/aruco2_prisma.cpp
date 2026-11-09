@@ -4203,31 +4203,6 @@ using detail::PLevel;
 }
 
 
-static const PMark& getPrismaMarker(
-    const PDict& dictionary,
-    int markerId
-)
-{
-    const auto it = std::find_if(
-        dictionary.markers.begin(),
-        dictionary.markers.end(),
-        [markerId](const PMark& marker)
-        {
-            return marker.id == markerId;
-        }
-    );
-
-    if (it == dictionary.markers.end())
-    {
-        prismarkerFail(
-            "PRISMarker id not found: " + std::to_string(markerId),
-            "getPrismaMarker"
-        );
-    }
-
-    return *it;
-}
-
 static cv::Mat bitsToMat(const PLevel& level)
 {
     cv::Mat bits(level.n, level.n, CV_8UC1);
@@ -4753,8 +4728,8 @@ static int prismaPrintCellSize(
 // Render one PRISMarker; batch printing is handled by the CLI
 // via getPrismaCount().
 static cv::Mat renderPrismaImage(
-    const PDict& dict,
-    int markerId,
+    const PMark& marker,
+    DictionaryType auxiliaryDictionary,
     int bitSize
 )
 {
@@ -4766,14 +4741,11 @@ static cv::Mat renderPrismaImage(
         );
     }
 
-    const PMark& marker =
-        getPrismaMarker(dict, markerId);
-
     // Automatically select a suitable size.
     const int lastLevelBitSize =
         prismaPrintCellSize(
             bitSize,
-            dict.arucoDict
+            auxiliaryDictionary
         );
 
     // Calculate the final image size before allocating memory.
@@ -4827,7 +4799,7 @@ static cv::Mat renderPrismaImage(
 
     return drawPRISMarker(
         marker,
-        dict.arucoDict,
+        auxiliaryDictionary,
         lastLevelBitSize
     );
 }
@@ -4844,11 +4816,10 @@ void getPrismaMarkerImage(
     if (markerId < 0)
         CV_Error(cv::Error::StsBadArg, "PRISMarker id must be non-negative");
 
-    const cv::Mat markerImage = renderPrismaImage(
-        detail::loadPDict(dictionary, auxiliaryDictionary),
-        markerId,
-        bitSize
-    );
+    const detail::PMark marker =
+        detail::loadPMarker(dictionary, auxiliaryDictionary, markerId);
+    const cv::Mat markerImage =
+        renderPrismaImage(marker, auxiliaryDictionary, bitSize);
     markerImage.copyTo(image);
 }
 
