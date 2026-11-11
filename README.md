@@ -371,7 +371,7 @@ cv::aruco2::PrismaDetector detector(
     cv::aruco2::PRISMA_D2, cv::aruco2::DICT_ARUCO_MIP_36h12);
 
 auto markers = detector.detect(image);
-cv::aruco2::drawPrisma(image, markers);
+cv::aruco2::drawPrismaMarkers(image, markers);
 for (const auto& marker : markers)
     std::cout << "id=" << marker.id << " levels=" << marker.getNLevels() << "\n";
 ```
